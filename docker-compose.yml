@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: brainx
+      POSTGRES_USER: brainx
+      POSTGRES_PASSWORD: brainx
+    ports:
+      - "5432:5432"
+    volumes:
+      - brainx-postgres:/var/lib/postgresql/data
+
+volumes:
+  brainx-postgres:

@@ -1,0 +1,26 @@
+# Dependencies and package caches
+node_modules/
+
+# Frontend build output
+dist/
+coverage/
+
+# Java / Maven
+target/
+.mvn/wrapper/maven-wrapper.jar
+
+# Rust
+**/target/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Logs and editor state
+*.log
+logs/
+**/logs/
+.DS_Store
+.idea/
+.vscode/
