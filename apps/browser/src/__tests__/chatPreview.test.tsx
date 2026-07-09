@@ -251,7 +251,8 @@ describe('Chat design preview', () => {
 
     await user.click(within(timeline).getByRole('button', { name: 'Write apps/browser/src/pages/ChatPreviewPage.css' }));
     const writeDetails = within(timeline).getByRole('region', { name: 'write_file details' });
-    expect(within(writeDetails).getByText('apps/browser/src/pages/ChatPreviewPage.css')).toBeInTheDocument();
+    expect(within(writeDetails).getByLabelText('File diff')).toBeInTheDocument();
+    expect(writeDetails.querySelector('code[data-line-kind="add"]')).toHaveTextContent('.chat-preview-page');
     expect(within(writeDetails).queryByText('Mode')).not.toBeInTheDocument();
     expect(within(writeDetails).queryByText('Bytes')).not.toBeInTheDocument();
 

@@ -24,6 +24,31 @@ class AuthAndBindingFlowTest {
   @Autowired ObjectMapper mapper;
 
   @Test
+  void clientDaemonCanCreateBindCodeWithoutLoginAndBrowserCompletesBind() throws Exception {
+    String browserToken = register("user_a", "pw-a-12345");
+    JsonNode registeredDaemon = postJson("/api/v1/client-daemons/register", """
+      {"workspaceId":"w_core","deviceName":"devbox","capabilities":["model.invoke","agent.loop"]}
+      """);
+    String daemonId = registeredDaemon.get("id").asText();
+
+    JsonNode codeResponse = postJson("/api/v1/client-daemons/" + daemonId + "/bind-code", "{}");
+    JsonNode bound = postJson(
+        "/api/v1/client-daemons/complete-bind",
+        """
+        {"code":"%s"}
+        """.formatted(codeResponse.get("code").asText()),
+        browserToken
+    );
+
+    assertThat(bound.get("id").asText()).isEqualTo(daemonId);
+    assertThat(bound.get("userId").asText()).isNotBlank();
+    postJson("/api/v1/client-daemons/" + daemonId + "/unbind", "{" + quote("confirm") + ":false}", null, status().isBadRequest());
+    postJson("/api/v1/client-daemons/" + daemonId + "/unbind", "{" + quote("confirm") + ":true}");
+    JsonNode devices = getJson("/api/v1/client-daemons", browserToken);
+    assertThat(devices.get(0).get("status").asText()).isEqualTo("revoked");
+  }
+
+  @Test
   void userRegistersLogsInAndBindsClientDaemonWithSingleUseCode() throws Exception {
     JsonNode registered = postJson("/api/v1/auth/register", """
       {"username":"user_a","password":"correct horse battery"}

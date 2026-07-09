@@ -30,11 +30,11 @@ function getWorkspaceId(pathname: string, routeParam?: string) {
 
 function getNavItems(workspaceId: string, t: (key: string) => string) {
   return [
-    { to: `/workspaces/${workspaceId}/chat`, label: t('nav.chat'), icon: MessageSquare },
+    { to: `/`, label: t('nav.chat'), icon: MessageSquare, end: true },
     { to: `/workspaces/${workspaceId}/agents`, label: t('nav.agents'), icon: Bot },
     { to: `/workspaces/${workspaceId}/branches`, label: t('nav.branches'), icon: GitBranch },
     { to: `/workspaces/${workspaceId}/approvals`, label: t('nav.approvals'), icon: KeyRound },
-    { to: `/workspaces/${workspaceId}/skill-drafts/sd_motion/review`, label: t('nav.skills'), icon: Sparkles },
+    { to: `/workspaces/${workspaceId}/skills`, label: t('nav.skills'), icon: Sparkles },
     { to: `/workspaces/${workspaceId}/client-daemons`, label: t('nav.client'), icon: Activity },
     { to: `/workspaces/${workspaceId}`, label: t('nav.dashboard'), icon: LayoutDashboard, end: true },
     { to: `/workspaces/${workspaceId}/settings`, label: t('nav.settings'), icon: Settings }
@@ -44,14 +44,14 @@ function getNavItems(workspaceId: string, t: (key: string) => string) {
 function getPageTitle(pathname: string, workspaceId: string, t: (key: string) => string) {
   const base = `/workspaces/${workspaceId}`;
 
-  if (pathname === '/') return 'Workspaces';
+  if (pathname === '/') return t('nav.chat');
   if (pathname === `${base}/chat-preview`) return t('chatPreview.title');
   if (pathname === `${base}/chat`) return t('nav.chat');
   if (pathname.startsWith(`${base}/agents/`) && pathname.includes('/runs/')) return t('runDetail.title');
   if (pathname.startsWith(`${base}/agents`)) return t('nav.agents');
   if (pathname.startsWith(`${base}/branches`)) return t('nav.branches');
   if (pathname.startsWith(`${base}/approvals`)) return t('nav.approvals');
-  if (pathname.includes('/skill-drafts/')) return t('skills.title');
+  if (pathname.startsWith(`${base}/skills`) || pathname.includes('/skill-drafts/')) return t('skills.title');
   if (pathname.startsWith(`${base}/client-daemons`)) return t('nav.client');
   if (pathname.startsWith(`${base}/settings`)) return t('nav.settings');
   return t('nav.dashboard');
@@ -88,7 +88,7 @@ export function AppShell() {
           </div>
           <div className="brand-copy" aria-hidden={collapsed} data-visible={String(!collapsed)} data-testid="brand-copy">
             <strong>brainx</strong>
-            <span>{t('common.workspace')}</span>
+            <span>Session</span>
           </div>
         </div>
         <nav className="nav-stack" aria-label={t('nav.primary')} data-align={collapsed ? 'center' : 'stretch'} data-collapsed={collapsed}>

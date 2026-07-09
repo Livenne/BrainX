@@ -27,11 +27,12 @@ describe('browser routing', () => {
     expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
   });
 
-  it('renders the workspace entry route', async () => {
+  it('renders the session chat entry route', async () => {
     renderAt('/');
 
-    expect(await screen.findByRole('heading', { name: /^workspaces$/i })).toBeInTheDocument();
-    expect(await screen.findByRole('link', { name: /workspace-core/i })).toHaveAttribute('href', '/workspaces/w_core/chat');
+    expect(await screen.findByRole('heading', { name: /^chat$/i })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'What should brainx work on?' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Empty chat' })).toBeInTheDocument();
   });
 
   it('renders the run detail route', async () => {

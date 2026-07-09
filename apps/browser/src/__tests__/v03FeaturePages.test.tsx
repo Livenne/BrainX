@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -63,13 +63,18 @@ describe('v0.3 feature page interactions', () => {
     expect(screen.getAllByText('Evidence reviewed and risk accepted').length).toBeGreaterThan(0);
   });
 
-  it('lets users publish or reject skill drafts from the review page', async () => {
+  it('lets users approve or reject pending skill proposals from the review page', async () => {
     const user = userEvent.setup();
     renderAt('/workspaces/w_core/skill-drafts/sd_motion/review');
 
     expect(await screen.findByRole('heading', { name: 'Skill Review' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Publish skill' }));
-    expect(await screen.findByText('Published as v0.5')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Reject draft' })).toBeInTheDocument();
+    expect(await screen.findByText('review-agent-output')).toBeInTheDocument();
+    expect(await screen.findByText('summarize-session')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { name: 'Approve' })[0]);
+    await waitFor(() => expect(screen.queryByText('review-agent-output')).not.toBeInTheDocument());
+    await user.click(screen.getAllByRole('button', { name: 'Reject' })[0]);
+
+    expect(await screen.findByText('No pending skill proposals.')).toBeInTheDocument();
   });
 });

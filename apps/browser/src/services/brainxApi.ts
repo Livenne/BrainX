@@ -4,8 +4,11 @@ import type {
   AuthResponse,
   BindCodeResponse,
   ChatSession,
+  ChatAttachmentInput,
   ClientDaemon,
   ExecutionEvent,
+  SkillInventory,
+  SkillProposal,
   Workspace
 } from '../domain/types';
 
@@ -15,16 +18,122 @@ export async function getChatSession(workspaceId: string): Promise<ChatSession> 
   return requestJson<ChatSession>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/session`, jsonInit());
 }
 
+export async function getChatSessionById(workspaceId: string, sessionId: string): Promise<ChatSession> {
+  return requestJson<ChatSession>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}`,
+    jsonInit()
+  );
+}
+
+export async function getChatSessions(workspaceId: string): Promise<ChatSession[]> {
+  return requestJson<ChatSession[]>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions`, jsonInit());
+}
+
+export async function getSkillInventory(workspaceId: string): Promise<SkillInventory> {
+  return requestJson<SkillInventory>(`/workspaces/${encodeURIComponent(workspaceId)}/skills`, jsonInit());
+}
+
+export async function getSkillProposals(): Promise<SkillProposal[]> {
+  return requestJson<SkillProposal[]>('/skill-proposals', jsonInit());
+}
+
+export async function approveSkillProposal(proposalId: string): Promise<SkillProposal> {
+  return requestJson<SkillProposal>(`/skill-proposals/${encodeURIComponent(proposalId)}/approve`, {
+    method: 'POST',
+    headers: jsonHeaders(),
+    body: JSON.stringify({})
+  });
+}
+
+export async function rejectSkillProposal(proposalId: string): Promise<SkillProposal> {
+  return requestJson<SkillProposal>(`/skill-proposals/${encodeURIComponent(proposalId)}/reject`, {
+    method: 'POST',
+    headers: jsonHeaders(),
+    body: JSON.stringify({})
+  });
+}
+
+export async function createChatSession(workspaceId: string, title?: string): Promise<ChatSession> {
+  return requestJson<ChatSession>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions`, {
+    method: 'POST',
+    headers: jsonHeaders(),
+    body: JSON.stringify(title ? { title } : {})
+  });
+}
+
 export async function getWorkspaces(token: string): Promise<Workspace[]> {
   return requestJson<Workspace[]>('/workspaces', jsonInit(token));
 }
 
-export async function sendChatMessage(workspaceId: string, content: string): Promise<ChatSession> {
+export async function sendChatMessage(
+  workspaceId: string,
+  content: string,
+  attachments: ChatAttachmentInput[] = []
+): Promise<ChatSession> {
   return requestJson<ChatSession>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/messages`, {
     method: 'POST',
     headers: jsonHeaders(),
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content, attachments })
   });
+}
+
+export async function sendSessionChatMessage(
+  workspaceId: string,
+  sessionId: string,
+  content: string,
+  attachments: ChatAttachmentInput[] = []
+): Promise<ChatSession> {
+  return requestJson<ChatSession>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ content, attachments })
+    }
+  );
+}
+
+export async function renameChatSession(workspaceId: string, sessionId: string, title: string): Promise<ChatSession> {
+  return requestJson<ChatSession>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PATCH',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ title })
+    }
+  );
+}
+
+export async function forkChatSession(workspaceId: string, sessionId: string): Promise<ChatSession> {
+  return requestJson<ChatSession>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}/fork`,
+    {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({})
+    }
+  );
+}
+
+export async function cancelChatSession(workspaceId: string, sessionId: string): Promise<ChatSession> {
+  return requestJson<ChatSession>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}/cancel`,
+    {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({})
+    }
+  );
+}
+
+export async function deleteChatSession(workspaceId: string, sessionId: string): Promise<void> {
+  await requestJson<{ accepted: boolean }>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}?confirm=true`,
+    {
+      method: 'DELETE',
+      headers: jsonHeaders()
+    }
+  );
 }
 
 export async function sendChatCommand(
@@ -39,6 +148,22 @@ export async function sendChatCommand(
   });
 }
 
+export async function sendSessionChatCommand(
+  workspaceId: string,
+  sessionId: string,
+  command: string,
+  args: Record<string, unknown> = {}
+): Promise<ChatSession> {
+  return requestJson<ChatSession>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions/${encodeURIComponent(sessionId)}/commands`,
+    {
+      method: 'POST',
+      headers: jsonHeaders(),
+      body: JSON.stringify({ command, arguments: args })
+    }
+  );
+}
+
 export async function pollChatSession(workspaceId: string): Promise<ChatSession> {
   return getChatSession(workspaceId);
 }
@@ -48,6 +173,25 @@ export async function getRunEvents(agentId: string, runId: string): Promise<Exec
     `/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/events`,
     jsonInit()
   );
+}
+
+export function subscribeChatEvents(
+  workspaceId: string,
+  runId: string,
+  afterSequence: number,
+  onEvent: (event: ExecutionEvent) => void,
+  onError?: (error: Event) => void
+): () => void {
+  const params = new URLSearchParams({ runId, after: String(afterSequence) });
+  const source = new EventSource(`/api/v1/workspaces/${encodeURIComponent(workspaceId)}/chat/events?${params.toString()}`);
+  source.addEventListener('model.stream.delta', (event) => {
+    const message = event as MessageEvent<string>;
+    onEvent(JSON.parse(message.data) as ExecutionEvent);
+  });
+  source.onerror = (event) => {
+    onError?.(event);
+  };
+  return () => source.close();
 }
 
 export async function registerUser(username: string, password: string): Promise<AuthResponse> {

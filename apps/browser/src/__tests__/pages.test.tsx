@@ -48,10 +48,11 @@ describe('core pages', () => {
     expect(await screen.findByText(/Run missing_run was not found/i)).toBeInTheDocument();
   });
 
-  it('does not render an unrelated skill draft for an unknown draft route', async () => {
+  it('keeps legacy skill draft review routes on the skills console', async () => {
     renderAt('/workspaces/w_core/skill-drafts/unknown/review');
 
-    expect(await screen.findByText(/Skill draft unknown was not found/i)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Skill Review' })).toBeInTheDocument();
+    expect(await screen.findByText('Pending proposals')).toBeInTheDocument();
     expect(screen.queryByText('browser-motion-review')).not.toBeInTheDocument();
   });
 

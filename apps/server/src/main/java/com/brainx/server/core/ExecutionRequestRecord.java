@@ -65,13 +65,34 @@ public record ExecutionRequestRecord(
       List<Map<String, Object>> tools,
       String modelName
   ) {
+    return modelInvoke(executionId, workspaceId, agentId, branchId, runId, phase, loopIndex, messages, tools, modelName, "");
+  }
+
+  public static ExecutionRequestRecord modelInvoke(
+      String executionId,
+      String workspaceId,
+      String agentId,
+      String branchId,
+      String runId,
+      String phase,
+      int loopIndex,
+      List<Map<String, Object>> messages,
+      List<Map<String, Object>> tools,
+      String modelName,
+      String currentWorkspace
+  ) {
     var input = new java.util.LinkedHashMap<String, Object>();
     input.put("phase", phase);
     input.put("loopIndex", loopIndex);
     input.put("messages", messages);
-    input.put("tools", tools);
+    if (tools != null && !tools.isEmpty()) {
+      input.put("tools", tools);
+    }
     if (modelName != null && !modelName.isBlank()) {
       input.put("modelName", modelName);
+    }
+    if (currentWorkspace != null && !currentWorkspace.isBlank()) {
+      input.put("currentWorkspace", currentWorkspace);
     }
     return new ExecutionRequestRecord(
         executionId,

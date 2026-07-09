@@ -36,11 +36,13 @@ describe('v0.2 page content depth', () => {
     expect(screen.queryByText(/Workspace interface preferences/i)).not.toBeInTheDocument();
   });
 
-  it('shows richer skill review evidence and diff sections', async () => {
+  it('shows skill inventory and pending proposal review sections', async () => {
     renderAt('/workspaces/w_core/skill-drafts/sd_motion/review');
 
     expect(await screen.findByRole('heading', { name: 'Skill Review' })).toBeInTheDocument();
-    expect(await screen.findByText('证据')).toBeInTheDocument();
-    expect(await screen.findByText('版本 Diff')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Current workspace' })).toBeInTheDocument();
+    expect(await screen.findByText('debug-rust')).toBeInTheDocument();
+    expect(await screen.findByText('write-plan')).toBeInTheDocument();
+    expect(await screen.findByText('review-agent-output')).toBeInTheDocument();
   });
 });

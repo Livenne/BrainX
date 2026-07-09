@@ -194,6 +194,7 @@ export const chatSessions: ChatSession[] = [
     id: 'chat_main',
     title: 'Browser workbench run',
     workspaceName: workspace.name,
+    currentWorkspace: '~/.brainx/workspace',
     agentId: 'agent_frontend',
     agentName: 'frontend-main',
     branchName: 'mainline',
@@ -228,6 +229,14 @@ export const chatSessions: ChatSession[] = [
         riskTier: 'read'
       }
     },
+    queuedInputs: [
+      {
+        id: 'queued_1',
+        content: '插话：继续测试附件',
+        attachments: [],
+        createdAt: '2026-07-04T10:45:20Z'
+      }
+    ],
     updatedAt: '2026-07-04T10:45:16Z',
     messages: [
       {
@@ -236,6 +245,7 @@ export const chatSessions: ChatSession[] = [
       },
       {
         role: 'assistant',
+        thinking: 'Need to inspect current UI structure before changing the composer.',
         content: 'Plan\n\n- Inspect current AppShell and Chat files\n- Render tool calls and context references\n- Keep write execution gated by approval',
         tool_calls: [
           {

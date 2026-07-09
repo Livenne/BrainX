@@ -1,20 +1,18 @@
-use crate::auth::ClientConfig;
+use crate::auth::{default_state_dir, ClientConfig};
 use anyhow::{anyhow, Context, Result};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonStatus {
     NotStarted,
     Running(u32),
     Stale(u32),
-}
-
-pub fn default_state_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME").context("HOME is required to locate brainx client state")?;
-    Ok(PathBuf::from(home).join(".brainx"))
 }
 
 pub fn default_pid_path() -> Result<PathBuf> {
@@ -72,12 +70,8 @@ pub fn build_start_command_args(config: &ClientConfig, config_path: &Path, poll_
     Ok(vec![
         "--server-url".into(),
         config.server_url.clone().into(),
-        "--workspace-id".into(),
-        config.active_workspace_id.clone().into(),
         "--device-name".into(),
         config.device_name.clone().into(),
-        "--workspace-root".into(),
-        config.active_workspace()?.path.clone().into(),
         "--poll-interval-ms".into(),
         poll_interval_ms.to_string().into(),
         "--config-path".into(),
@@ -110,13 +104,15 @@ pub fn start_daemon_background(
     let log_file_for_stderr = log_file
         .try_clone()
         .with_context(|| format!("failed to clone log file {}", log_path.display()))?;
-    let child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(build_start_command_args(config, config_path, poll_interval_ms)?)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_for_stderr))
-        .spawn()
-        .context("failed to start client daemon")?;
+        .stderr(Stdio::from(log_file_for_stderr));
+    #[cfg(unix)]
+    command.process_group(0);
+    let child = command.spawn().context("failed to start client daemon")?;
 
     let pid = child.id();
     fs::write(pid_path, pid.to_string()).with_context(|| format!("failed to write pidfile {}", pid_path.display()))?;

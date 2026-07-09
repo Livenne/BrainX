@@ -1,4 +1,4 @@
-use brainx_client_daemon::auth::{ClientConfig, ClientModelConfig, ClientWorkspaceConfig};
+use brainx_client_daemon::auth::{ClientConfig, ClientModelConfig};
 use brainx_client_daemon::lifecycle::{
     build_start_command_args, clear_stale_pidfile, daemon_status, ensure_daemon_stopped, DaemonStatus,
 };
@@ -45,15 +45,6 @@ fn start_command_args_use_saved_config_and_hidden_foreground_mode() {
     let config_path = temp.path().join("client.json");
     let config = ClientConfig {
         server_url: "http://localhost:8080".to_string(),
-        username: Some("user_a".to_string()),
-        session_token: Some("token_a".to_string()),
-        active_workspace_id: "w_core".to_string(),
-        workspaces: vec![ClientWorkspaceConfig {
-            id: "w_core".to_string(),
-            name: "Core".to_string(),
-            path: "/home/user/project".to_string(),
-            default: false,
-        }],
         device_name: "devbox".to_string(),
         daemon_id: Some("cd_1".to_string()),
         active_model: "nvidia-step".to_string(),
@@ -71,7 +62,7 @@ fn start_command_args_use_saved_config_and_hidden_foreground_mode() {
     let rendered: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().to_string()).collect();
 
     assert_eq!(rendered.last().map(String::as_str), Some("run-foreground"));
-    assert!(rendered.windows(2).any(|pair| pair == ["--workspace-root", "/home/user/project"]));
+    assert!(!rendered.iter().any(|arg| arg == "--workspace-root"));
     assert!(rendered.windows(2).any(|pair| pair == ["--config-path", config_path.to_string_lossy().as_ref()]));
     assert!(rendered.windows(2).any(|pair| pair == ["--poll-interval-ms", "750"]));
 }

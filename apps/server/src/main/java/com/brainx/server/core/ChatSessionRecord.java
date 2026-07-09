@@ -7,8 +7,12 @@ import java.util.Map;
 public record ChatSessionRecord(
     String id,
     String title,
+    String parentSessionId,
+    String rootSessionId,
+    String forkedFromSessionId,
     String workspaceId,
     String workspaceName,
+    String currentWorkspace,
     String agentId,
     String agentName,
     String branchId,
@@ -24,6 +28,9 @@ public record ChatSessionRecord(
     Map<String, Object> contextBudget,
     List<Map<String, Object>> availableModels,
     String activeModelName,
+    List<Map<String, Object>> queuedInputs,
+    List<Map<String, Object>> timelineNotices,
+    Instant createdAt,
     Instant updatedAt,
     List<Map<String, Object>> messages
 ) {
@@ -31,8 +38,12 @@ public record ChatSessionRecord(
     return new ChatSessionRecord(
         id,
         title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
         workspaceId,
         workspaceName,
+        currentWorkspace,
         agentId,
         agentName,
         branchId,
@@ -48,6 +59,9 @@ public record ChatSessionRecord(
         contextBudget,
         availableModels,
         activeModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
         nextUpdatedAt,
         messages
     );
@@ -57,8 +71,12 @@ public record ChatSessionRecord(
     return new ChatSessionRecord(
         id,
         title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
         workspaceId,
         workspaceName,
+        currentWorkspace,
         agentId,
         agentName,
         branchId,
@@ -74,6 +92,9 @@ public record ChatSessionRecord(
         contextBudget,
         availableModels,
         activeModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
         nextUpdatedAt,
         List.copyOf(nextMessages)
     );
@@ -83,8 +104,12 @@ public record ChatSessionRecord(
     return new ChatSessionRecord(
         id,
         title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
         workspaceId,
         workspaceName,
+        currentWorkspace,
         agentId,
         agentName,
         branchId,
@@ -100,6 +125,9 @@ public record ChatSessionRecord(
         contextBudget,
         availableModels,
         activeModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
         updatedAt,
         messages
     );
@@ -114,8 +142,12 @@ public record ChatSessionRecord(
     return new ChatSessionRecord(
         id,
         title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
         workspaceId,
         workspaceName,
+        currentWorkspace,
         agentId,
         agentName,
         branchId,
@@ -131,6 +163,9 @@ public record ChatSessionRecord(
         Map.copyOf(nextContextBudget),
         List.copyOf(nextAvailableModels),
         nextActiveModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
         updatedAt,
         messages
     );
@@ -146,8 +181,12 @@ public record ChatSessionRecord(
     return new ChatSessionRecord(
         id,
         title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
         workspaceId,
         workspaceName,
+        currentWorkspace,
         agentId,
         agentName,
         branchId,
@@ -163,8 +202,181 @@ public record ChatSessionRecord(
         contextBudget,
         availableModels,
         activeModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
         nextUpdatedAt,
         messages
+    );
+  }
+
+  public ChatSessionRecord withCurrentWorkspace(String nextCurrentWorkspace, Instant nextUpdatedAt) {
+    return new ChatSessionRecord(
+        id,
+        title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
+        workspaceId,
+        workspaceName,
+        nextCurrentWorkspace,
+        agentId,
+        agentName,
+        branchId,
+        branchName,
+        skillName,
+        clientName,
+        runId,
+        runStatus,
+        todos,
+        terminals,
+        subagents,
+        toolStates,
+        contextBudget,
+        availableModels,
+        activeModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
+        nextUpdatedAt,
+        messages
+    );
+  }
+
+  public ChatSessionRecord withQueuedInputs(List<Map<String, Object>> nextQueuedInputs, Instant nextUpdatedAt) {
+    return new ChatSessionRecord(
+        id,
+        title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
+        workspaceId,
+        workspaceName,
+        currentWorkspace,
+        agentId,
+        agentName,
+        branchId,
+        branchName,
+        skillName,
+        clientName,
+        runId,
+        runStatus,
+        todos,
+        terminals,
+        subagents,
+        toolStates,
+        contextBudget,
+        availableModels,
+        activeModelName,
+        List.copyOf(nextQueuedInputs),
+        timelineNotices,
+        createdAt,
+        nextUpdatedAt,
+        messages
+    );
+  }
+
+  public ChatSessionRecord withTitle(String nextTitle, Instant nextUpdatedAt) {
+    return new ChatSessionRecord(
+        id,
+        nextTitle,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
+        workspaceId,
+        workspaceName,
+        currentWorkspace,
+        agentId,
+        agentName,
+        branchId,
+        branchName,
+        skillName,
+        clientName,
+        runId,
+        runStatus,
+        todos,
+        terminals,
+        subagents,
+        toolStates,
+        contextBudget,
+        availableModels,
+        activeModelName,
+        queuedInputs,
+        timelineNotices,
+        createdAt,
+        nextUpdatedAt,
+        messages
+    );
+  }
+
+  public ChatSessionRecord withTimelineNotices(List<Map<String, Object>> nextTimelineNotices, Instant nextUpdatedAt) {
+    return new ChatSessionRecord(
+        id,
+        title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
+        workspaceId,
+        workspaceName,
+        currentWorkspace,
+        agentId,
+        agentName,
+        branchId,
+        branchName,
+        skillName,
+        clientName,
+        runId,
+        runStatus,
+        todos,
+        terminals,
+        subagents,
+        toolStates,
+        contextBudget,
+        availableModels,
+        activeModelName,
+        queuedInputs,
+        List.copyOf(nextTimelineNotices),
+        createdAt,
+        nextUpdatedAt,
+        messages
+    );
+  }
+
+  public ChatSessionRecord withMessagesAndTimelineNotices(
+      List<Map<String, Object>> nextMessages,
+      List<Map<String, Object>> nextTimelineNotices,
+      String nextRunStatus,
+      Instant nextUpdatedAt
+  ) {
+    return new ChatSessionRecord(
+        id,
+        title,
+        parentSessionId,
+        rootSessionId,
+        forkedFromSessionId,
+        workspaceId,
+        workspaceName,
+        currentWorkspace,
+        agentId,
+        agentName,
+        branchId,
+        branchName,
+        skillName,
+        clientName,
+        runId,
+        nextRunStatus,
+        todos,
+        terminals,
+        subagents,
+        toolStates,
+        contextBudget,
+        availableModels,
+        activeModelName,
+        queuedInputs,
+        List.copyOf(nextTimelineNotices),
+        createdAt,
+        nextUpdatedAt,
+        List.copyOf(nextMessages)
     );
   }
 }

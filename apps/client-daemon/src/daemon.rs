@@ -1,14 +1,19 @@
-use crate::auth::{sync_workspaces, ClientConfig, CAPABILITIES};
+use crate::auth::{default_workspace_path, save_config, ClientConfig, CAPABILITIES};
 use crate::logging::log_event;
-use crate::model::{ModelClient, ModelConfig};
+use crate::model::{ModelClient, ModelConfig, ModelStreamEvent};
 use crate::protocol::{
-    ExecutionRequest, ExecutionResultPayload, RegisterDaemonRequest, RegisterDaemonResponse,
+    ExecutionRequest, ExecutionResultPayload, ExecutionStreamEventPayload, RegisterDaemonRequest,
+    RegisterDaemonResponse,
 };
-use crate::tools::WorkspaceTools;
-use anyhow::{Context, Result};
-use reqwest::Client;
-use serde_json::json;
+use crate::tools::{ToolRuntimeState, WorkspaceTools};
+use anyhow::{Context, Error, Result};
+use reqwest::{Client, StatusCode};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -27,8 +32,9 @@ pub async fn run_once(
         json!({"daemonId": &daemon.id, "workspaceId": workspace_id, "requestCount": requests.len()}),
     );
     let tools = WorkspaceTools::new(workspace_root);
+    post_skill_inventory(&client, server_url, &daemon.id, &tools).await;
     for request in requests {
-        let result = execute_request(&tools, &request, None).await;
+        let result = execute_request(&client, server_url, &daemon.id, &tools, &request, None).await;
         post_result(&client, server_url, &daemon.id, &result).await?;
     }
     Ok(())
@@ -51,8 +57,9 @@ pub async fn run_loop(
             "daemon.poll.completed",
             json!({"daemonId": &daemon.id, "workspaceId": workspace_id, "requestCount": requests.len()}),
         );
+        post_skill_inventory(&client, server_url, &daemon.id, &tools).await;
         for request in requests {
-            let result = execute_request(&tools, &request, None).await;
+            let result = execute_request(&client, server_url, &daemon.id, &tools, &request, None).await;
             post_result(&client, server_url, &daemon.id, &result).await?;
         }
         sleep(poll_interval).await;
@@ -60,50 +67,64 @@ pub async fn run_loop(
 }
 
 pub async fn run_loop_with_config(
-    config: &ClientConfig,
-    workspace_root: &Path,
+    config_path: PathBuf,
+    mut config: ClientConfig,
     poll_interval: Duration,
 ) -> Result<()> {
     let client = Client::new();
-    let daemon_id = config.require_daemon_id()?.to_string();
-    sync_workspaces(config).await?;
+    let mut daemon_id = match config.daemon_id.clone() {
+        Some(daemon_id) if !daemon_id.is_empty() => daemon_id,
+        _ => {
+            let daemon = register(&client, &config.server_url, "w_core", &config.device_name).await?;
+            config.daemon_id = Some(daemon.id.clone());
+            save_config(config_path.clone(), &config)?;
+            daemon.id
+        }
+    };
+    let tool_runtime = ToolRuntimeState::default();
     loop {
-        let requests = poll_requests_with_token(
-            &client,
-            &config.server_url,
-            &daemon_id,
-            config.session_token.as_deref(),
-        )
-        .await?;
+        let requests = match poll_requests(&client, &config.server_url, &daemon_id).await {
+            Ok(requests) => requests,
+            Err(error) if is_http_status(&error, StatusCode::NOT_FOUND) => {
+                log_event(
+                    "warn",
+                    "daemon.registration.stale",
+                    json!({"daemonId": &daemon_id, "reason": "server did not recognize daemon id"}),
+                );
+                let daemon = register(&client, &config.server_url, "w_core", &config.device_name).await?;
+                daemon_id = daemon.id.clone();
+                config.daemon_id = Some(daemon.id);
+                save_config(config_path.clone(), &config)?;
+                Vec::new()
+            }
+            Err(error) => return Err(error),
+        };
         log_event(
             "info",
             "daemon.poll.completed",
-            json!({"daemonId": &daemon_id, "workspaceId": &config.active_workspace_id, "requestCount": requests.len()}),
+            json!({"daemonId": &daemon_id, "requestCount": requests.len()}),
         );
         for request in requests {
-            let request_workspace_root = workspace_root_for_request(config, workspace_root, &request.workspace_id);
-            let tools = WorkspaceTools::new(&request_workspace_root);
-            let result = execute_request(&tools, &request, Some(config)).await;
-            post_result_with_token(
-                &client,
-                &config.server_url,
-                &daemon_id,
-                &result,
-                config.session_token.as_deref(),
-            )
-            .await?;
+            let workspace_root = request
+                .input
+                .get("currentWorkspace")
+                .and_then(|value| value.as_str())
+                .map(PathBuf::from)
+                .unwrap_or(default_workspace_path()?);
+            let tools = WorkspaceTools::new_with_state(&workspace_root, tool_runtime.clone());
+            post_skill_inventory(&client, &config.server_url, &daemon_id, &tools).await;
+            let result = execute_request(&client, &config.server_url, &daemon_id, &tools, &request, Some(&config)).await;
+            post_result(&client, &config.server_url, &daemon_id, &result).await?;
         }
         sleep(poll_interval).await;
     }
 }
 
-fn workspace_root_for_request(config: &ClientConfig, fallback_root: &Path, workspace_id: &str) -> PathBuf {
-    config
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == workspace_id)
-        .map(|workspace| PathBuf::from(&workspace.path))
-        .unwrap_or_else(|| fallback_root.to_path_buf())
+fn is_http_status(error: &Error, status: StatusCode) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .any(|cause| cause.status() == Some(status))
 }
 
 async fn register(
@@ -165,7 +186,46 @@ async fn poll_requests_with_token(
         .context("failed to decode execution requests")
 }
 
-async fn execute_request(tools: &WorkspaceTools, request: &ExecutionRequest, config: Option<&ClientConfig>) -> ExecutionResultPayload {
+async fn post_skill_inventory(client: &Client, server_url: &str, daemon_id: &str, tools: &WorkspaceTools) {
+    let inventory = match tools.skill_inventory() {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            log_event(
+                "warn",
+                "skills.scan.failed",
+                json!({"daemonId": daemon_id, "error": error.to_string()}),
+            );
+            return;
+        }
+    };
+    let url = format!(
+        "{}/api/v1/client-daemons/{daemon_id}/skills",
+        server_url.trim_end_matches('/')
+    );
+    if let Err(error) = client
+        .put(url)
+        .json(&inventory)
+        .send()
+        .await
+        .context("failed to sync skill inventory")
+        .and_then(|response| response.error_for_status().context("server rejected skill inventory sync"))
+    {
+        log_event(
+            "warn",
+            "skills.sync.failed",
+            json!({"daemonId": daemon_id, "error": error.to_string()}),
+        );
+    }
+}
+
+async fn execute_request(
+    http: &Client,
+    server_url: &str,
+    daemon_id: &str,
+    tools: &WorkspaceTools,
+    request: &ExecutionRequest,
+    config: Option<&ClientConfig>,
+) -> ExecutionResultPayload {
     let started = Instant::now();
     log_event(
         "info",
@@ -178,7 +238,7 @@ async fn execute_request(tools: &WorkspaceTools, request: &ExecutionRequest, con
         }),
     );
     let result = if request.tool_name == "model.invoke" {
-        execute_model_request(request, config).await
+        execute_model_request(http, server_url, daemon_id, tools, request, config).await
     } else {
         match tools.execute(&request.tool_name, &request.input) {
             Ok(data) => ExecutionResultPayload::completed(
@@ -212,15 +272,26 @@ async fn execute_request(tools: &WorkspaceTools, request: &ExecutionRequest, con
     result
 }
 
-async fn execute_model_request(request: &ExecutionRequest, config: Option<&ClientConfig>) -> ExecutionResultPayload {
+async fn execute_model_request(
+    http: &Client,
+    server_url: &str,
+    daemon_id: &str,
+    tools: &WorkspaceTools,
+    request: &ExecutionRequest,
+    config: Option<&ClientConfig>,
+) -> ExecutionResultPayload {
     let result = async {
         let model_name = request.input.get("modelName").and_then(|value| value.as_str());
         let model_config = match config {
             Some(config) => ModelConfig::from_client_config(config, model_name)?,
             None => ModelConfig::from_env()?,
         };
+        let request_tools = tools
+            .clone()
+            .with_active_model_info(model_config.name.clone(), model_config.model.clone());
         let client = ModelClient::new(model_config);
-        client.invoke(&request.input).await
+        let reporter = StreamReporter::new(http.clone(), server_url, daemon_id, request);
+        run_local_agent_loop(&request_tools, &client, &request.input, reporter).await
     }
     .await;
 
@@ -236,6 +307,176 @@ async fn execute_model_request(request: &ExecutionRequest, config: Option<&Clien
             error.to_string(),
         ),
     }
+}
+
+async fn run_local_agent_loop(
+    tools: &WorkspaceTools,
+    client: &ModelClient,
+    input: &Value,
+    stream_reporter: StreamReporter,
+) -> Result<Value> {
+    let mut request_input = input.clone();
+    let mut messages = request_input
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .context("model.invoke requires input.messages")?;
+    inject_local_context_messages(&mut messages, tools.local_context_messages());
+
+    loop {
+        request_input["messages"] = Value::Array(messages.clone());
+        let reporter = stream_reporter.clone();
+        let response = client
+            .invoke_streaming(&request_input, move |event| {
+                let reporter = reporter.clone();
+                async move { reporter.post(event).await }
+            })
+            .await?;
+        let message = response.get("message").cloned().unwrap_or_else(|| json!({}));
+        let tool_calls = message
+            .get("toolCalls")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        messages.push(assistant_message_from_model(&message, &tool_calls));
+
+        if tool_calls.is_empty() {
+            let mut final_response = response;
+            final_response["messages"] = Value::Array(messages);
+            return Ok(final_response);
+        }
+
+        for (index, tool_call) in tool_calls.iter().enumerate() {
+            let tool_call_id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("call_{index}"));
+            let tool_name = tool_call
+                .get("name")
+                .and_then(Value::as_str)
+                .context("model tool call requires name")?;
+            let arguments = tool_call.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            let tool_result = match tools.execute(tool_name, &arguments) {
+                Ok(data) => json!({ "ok": true, "result": data }),
+                Err(error) => json!({ "ok": false, "error": error.to_string() }),
+            };
+            messages.push(json!({
+                "role": "tool",
+                "toolCallId": tool_call_id,
+                "name": tool_name,
+                "content": serde_json::to_string(&tool_result).unwrap_or_else(|_| "{\"ok\":false,\"error\":\"failed to encode tool result\"}".to_string())
+            }));
+
+            if tool_name == "ask_user"
+                && tool_result
+                    .get("result")
+                    .and_then(|result| result.get("status"))
+                    .and_then(Value::as_str)
+                    == Some("waiting_for_user")
+            {
+                return Ok(json!({
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "toolCalls": []
+                    },
+                    "paused": true,
+                    "pause": tool_result.get("result").cloned().unwrap_or_else(|| json!({})),
+                    "messages": messages
+                }));
+            }
+        }
+    }
+}
+
+fn inject_local_context_messages(messages: &mut Vec<Value>, injected: Vec<Value>) {
+    if injected.is_empty() {
+        return;
+    }
+    let insert_at = messages
+        .iter()
+        .position(|message| message.get("role").and_then(Value::as_str) != Some("system"))
+        .unwrap_or(messages.len());
+    for (offset, message) in injected.into_iter().enumerate() {
+        messages.insert(insert_at + offset, message);
+    }
+}
+
+#[derive(Clone)]
+struct StreamReporter {
+    http: Client,
+    server_url: String,
+    daemon_id: String,
+    execution_id: String,
+    run_id: String,
+    sequence: Arc<AtomicUsize>,
+}
+
+impl StreamReporter {
+    fn new(http: Client, server_url: &str, daemon_id: &str, request: &ExecutionRequest) -> Self {
+        Self {
+            http,
+            server_url: server_url.trim_end_matches('/').to_string(),
+            daemon_id: daemon_id.to_string(),
+            execution_id: request.execution_id.clone(),
+            run_id: request.run_id.clone(),
+            sequence: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn post(&self, event: ModelStreamEvent) -> Result<()> {
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let url = format!(
+            "{}/api/v1/client-daemons/{}/execution-stream-events",
+            self.server_url, self.daemon_id
+        );
+        let result = self
+            .http
+            .post(url)
+            .json(&ExecutionStreamEventPayload {
+                execution_id: self.execution_id.clone(),
+                run_id: self.run_id.clone(),
+                sequence,
+                event_type: event.event_type.clone(),
+                content_delta: event.content_delta.clone(),
+                payload: event.payload.clone(),
+            })
+            .send()
+            .await
+            .context("failed to post execution stream event")?
+            .error_for_status()
+            .context("server rejected execution stream event");
+        if let Err(error) = result {
+            log_event(
+                "warn",
+                "execution.stream_event.failed",
+                json!({
+                    "executionId": &self.execution_id,
+                    "runId": &self.run_id,
+                    "sequence": sequence,
+                    "error": error.to_string()
+                }),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn assistant_message_from_model(message: &Value, tool_calls: &[Value]) -> Value {
+    let content = message.get("content").cloned().unwrap_or_else(|| json!(""));
+    let mut assistant = json!({
+        "role": "assistant",
+        "content": content
+    });
+    if let Some(thinking) = message.get("thinking").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+        assistant["thinking"] = json!(thinking);
+    }
+    if !tool_calls.is_empty() {
+        assistant["toolCalls"] = Value::Array(tool_calls.to_vec());
+    }
+    assistant
 }
 
 async fn post_result(

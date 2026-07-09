@@ -17,6 +17,10 @@ public record ClientDaemonRecord(
     return new ClientDaemonRecord(id, workspaceId, userId, deviceName, status, capabilities, boundAt, now);
   }
 
+  public ClientDaemonRecord boundTo(String nextUserId, Instant now) {
+    return new ClientDaemonRecord(id, workspaceId, nextUserId, deviceName, "active", capabilities, now, now);
+  }
+
   public ClientDaemonRecord heartbeat(Instant now) {
     return new ClientDaemonRecord(id, workspaceId, userId, deviceName, status, capabilities, boundAt, now);
   }

@@ -1,5 +1,8 @@
 use brainx_client_daemon::auth::{ClientConfig, ClientModelConfig};
-use brainx_client_daemon::model::{build_anthropic_messages_payload, build_openai_chat_payload, ModelClient, ModelConfig};
+use brainx_client_daemon::model::{
+    build_anthropic_messages_payload, build_openai_chat_payload, ModelClient, ModelConfig,
+};
+use brainx_client_daemon::tools::default_tool_schemas;
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -32,6 +35,7 @@ async fn model_invoke_posts_openai_request_and_normalizes_tool_calls() {
         .await;
 
     let client = ModelClient::new(ModelConfig {
+        name: "test-openai".to_string(),
         api_key: "test-api-key".to_string(),
         model: "stepfun-ai/step-3.7-flash".to_string(),
         base_url: format!("{}/v1", server.uri()),
@@ -76,6 +80,367 @@ async fn model_invoke_posts_openai_request_and_normalizes_tool_calls() {
 }
 
 #[tokio::test]
+async fn model_invoke_streaming_emits_openai_text_deltas_and_final_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    concat!(
+                        "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n",
+                        "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let client = ModelClient::new(ModelConfig {
+        name: "test-openai".to_string(),
+        api_key: "test-api-key".to_string(),
+        model: "test-model".to_string(),
+        base_url: format!("{}/v1", server.uri()),
+        protocol: "openai".to_string(),
+    });
+    let mut deltas = Vec::new();
+
+    let result = client
+        .invoke_streaming(
+            &json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": []
+            }),
+            |event| {
+                deltas.push(event.content_delta);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("streaming invoke should succeed");
+
+    assert_eq!(deltas, vec!["Hel", "lo"]);
+    assert_eq!(result["message"]["content"], "Hello");
+
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["stream"], true);
+}
+
+#[tokio::test]
+async fn model_invoke_streaming_emits_openai_reasoning_deltas() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    concat!(
+                        "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need\"}}]}\n\n",
+                        "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"reasoning_content\":\" tools\",\"content\":\"Done\"}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let client = ModelClient::new(ModelConfig {
+        name: "test-openai".to_string(),
+        api_key: "test-api-key".to_string(),
+        model: "test-model".to_string(),
+        base_url: format!("{}/v1", server.uri()),
+        protocol: "openai".to_string(),
+    });
+    let mut events = Vec::new();
+
+    let result = client
+        .invoke_streaming(
+            &json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": []
+            }),
+            |event| {
+                events.push((event.event_type, event.content_delta));
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("streaming invoke should succeed");
+
+    assert_eq!(
+        events,
+        vec![
+            ("assistant_thinking_delta".to_string(), "Need".to_string()),
+            ("assistant_thinking_delta".to_string(), " tools".to_string()),
+            ("assistant_delta".to_string(), "Done".to_string())
+        ]
+    );
+    assert_eq!(result["message"]["content"], "Done");
+    assert_eq!(result["message"]["thinking"], "Need tools");
+}
+
+#[tokio::test]
+async fn model_invoke_streaming_normalizes_openai_tool_call_deltas() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    concat!(
+                        "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_read\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n",
+                        "data: {\"model\":\"test-model\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"README.md\\\"}\"}}]}}]}\n\n",
+                        "data: [DONE]\n\n"
+                    )
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let client = ModelClient::new(ModelConfig {
+        name: "test-openai".to_string(),
+        api_key: "test-api-key".to_string(),
+        model: "test-model".to_string(),
+        base_url: format!("{}/v1", server.uri()),
+        protocol: "openai".to_string(),
+    });
+
+    let result = client
+        .invoke_streaming(
+            &json!({
+                "messages": [{"role": "user", "content": "read"}],
+                "tools": []
+            }),
+            |_| std::future::ready(Ok(())),
+        )
+        .await
+        .expect("streaming invoke should succeed");
+
+    assert_eq!(result["message"]["toolCalls"][0]["id"], "call_read");
+    assert_eq!(result["message"]["toolCalls"][0]["name"], "read_file");
+    assert_eq!(result["message"]["toolCalls"][0]["arguments"], json!({"path": "README.md"}));
+}
+
+#[tokio::test]
+async fn model_invoke_streaming_emits_anthropic_text_deltas_and_final_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    concat!(
+                        "event: message_start\n",
+                        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":5}}}\n\n",
+                        "event: content_block_delta\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+                        "event: message_delta\n",
+                        "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n",
+                        "event: message_stop\n",
+                        "data: {\"type\":\"message_stop\"}\n\n"
+                    )
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let client = ModelClient::new(ModelConfig {
+        name: "test-anthropic".to_string(),
+        api_key: "anthropic-key".to_string(),
+        model: "claude-test".to_string(),
+        base_url: format!("{}/v1", server.uri()),
+        protocol: "anthropic".to_string(),
+    });
+    let mut deltas = Vec::new();
+
+    let result = client
+        .invoke_streaming(
+            &json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": []
+            }),
+            |event| {
+                deltas.push(event.content_delta);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("streaming invoke should succeed");
+
+    assert_eq!(deltas, vec!["Hi"]);
+    assert_eq!(result["message"]["content"], "Hi");
+    assert_eq!(result["usage"]["output_tokens"], 3);
+}
+
+#[tokio::test]
+async fn model_invoke_streaming_emits_anthropic_thinking_deltas() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    concat!(
+                        "event: message_start\n",
+                        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\"}}\n\n",
+                        "event: content_block_delta\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Consider\"}}\n\n",
+                        "event: content_block_delta\n",
+                        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer\"}}\n\n",
+                        "event: message_stop\n",
+                        "data: {\"type\":\"message_stop\"}\n\n"
+                    )
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let client = ModelClient::new(ModelConfig {
+        name: "test-anthropic".to_string(),
+        api_key: "anthropic-key".to_string(),
+        model: "claude-test".to_string(),
+        base_url: format!("{}/v1", server.uri()),
+        protocol: "anthropic".to_string(),
+    });
+    let mut events = Vec::new();
+
+    let result = client
+        .invoke_streaming(
+            &json!({
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": []
+            }),
+            |event| {
+                events.push((event.event_type, event.content_delta));
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .expect("streaming invoke should succeed");
+
+    assert_eq!(
+        events,
+        vec![
+            ("assistant_thinking_delta".to_string(), "Consider".to_string()),
+            ("assistant_delta".to_string(), "Answer".to_string())
+        ]
+    );
+    assert_eq!(result["message"]["content"], "Answer");
+    assert_eq!(result["message"]["thinking"], "Consider");
+}
+
+#[tokio::test]
+async fn model_invoke_injects_canonical_client_tool_schemas_when_server_omits_tools() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl_2",
+            "model": "stepfun-ai/step-3.7-flash",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Ready",
+                    "tool_calls": []
+                }
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = ModelClient::new(ModelConfig {
+        name: "test-openai".to_string(),
+        api_key: "test-api-key".to_string(),
+        model: "stepfun-ai/step-3.7-flash".to_string(),
+        base_url: format!("{}/v1", server.uri()),
+        protocol: "openai".to_string(),
+    });
+    client
+        .invoke(&json!({
+            "messages": [{"role": "user", "content": "Inspect this project."}]
+        }))
+        .await
+        .expect("model invoke should succeed");
+
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    let tool_names = body["tools"]
+        .as_array()
+        .expect("tools should be injected")
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(tool_names.contains(&"read_files".to_string()));
+    assert!(tool_names.contains(&"edit_file".to_string()));
+    assert!(tool_names.contains(&"terminal_spawn".to_string()));
+    assert!(tool_names.contains(&"todo_create".to_string()));
+    assert!(!tool_names.contains(&"read_file".to_string()));
+    assert!(!tool_names.contains(&"apply_patch".to_string()));
+    assert!(!tool_names.contains(&"web_search".to_string()));
+}
+
+#[test]
+fn default_tool_schemas_expose_only_canonical_model_visible_names() {
+    let names = default_tool_schemas()
+        .iter()
+        .map(|tool| tool["function"]["name"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"get_env".to_string()));
+    assert!(names.contains(&"read_files".to_string()));
+    assert!(names.contains(&"write_file".to_string()));
+    assert!(names.contains(&"run_command".to_string()));
+    assert!(names.contains(&"ask_user".to_string()));
+    assert!(names.contains(&"terminal_list".to_string()));
+    assert!(!names.contains(&"read_file".to_string()));
+    assert!(!names.contains(&"background_start".to_string()));
+    assert!(!names.contains(&"web_search".to_string()));
+    assert!(!names.contains(&"subagent_start".to_string()));
+    assert!(!names.contains(&"branch_action".to_string()));
+    assert!(!names.contains(&"skill_action".to_string()));
+
+    let read_schema = default_tool_schemas()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "read_files")
+        .expect("read_files schema should be exposed");
+    let description = read_schema["function"]["description"]
+        .as_str()
+        .expect("description");
+    assert!(description.contains("Use for exact file content"));
+    assert!(description.contains("list_directory"));
+    assert_eq!(
+        read_schema["function"]["parameters"]["properties"]["files"]["items"]["additionalProperties"],
+        json!(false)
+    );
+
+    let run_schema = default_tool_schemas()
+        .into_iter()
+        .find(|tool| tool["function"]["name"] == "run_command")
+        .expect("run_command schema should be exposed");
+    let run_description = run_schema["function"]["description"]
+        .as_str()
+        .expect("run_command description");
+    assert!(run_description.contains("short, non-interactive shell command"));
+    assert!(run_description.contains("terminal_spawn"));
+
+    let serialized = serde_json::to_string(&default_tool_schemas()).expect("schemas should serialize");
+    assert!(!serialized.contains("mock web search"));
+    assert!(!serialized.contains("branch"));
+    assert!(names.contains(&"create_skill".to_string()));
+    assert!(names.contains(&"renovation_skill".to_string()));
+    assert!(!names.contains(&"skill_action".to_string()));
+    assert!(!serialized.contains("subagent"));
+}
+
+#[tokio::test]
 async fn model_invoke_reports_provider_status_and_body_on_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -87,6 +452,7 @@ async fn model_invoke_reports_provider_status_and_body_on_error() {
         .await;
 
     let client = ModelClient::new(ModelConfig {
+        name: "test-openai".to_string(),
         api_key: "test-api-key".to_string(),
         model: "stepfun-ai/step-3.7-flash".to_string(),
         base_url: format!("{}/v1", server.uri()),
@@ -129,10 +495,6 @@ fn model_config_uses_stepfun_flash_as_default_model() {
 fn model_config_selects_named_model_from_client_config() {
     let config = ClientConfig {
         server_url: "http://localhost:8080".to_string(),
-        username: None,
-        session_token: None,
-        active_workspace_id: "w_core".to_string(),
-        workspaces: vec![],
         device_name: "devbox".to_string(),
         daemon_id: None,
         active_model: "fast".to_string(),
@@ -158,6 +520,7 @@ fn model_config_selects_named_model_from_client_config() {
 
     let selected = ModelConfig::from_client_config(&config, Some("anthropic-main")).unwrap();
 
+    assert_eq!(selected.name, "anthropic-main");
     assert_eq!(selected.api_key, "anthropic-key");
     assert_eq!(selected.model, "claude-test");
     assert_eq!(selected.base_url, "https://api.anthropic.com/v1");
@@ -293,6 +656,37 @@ fn anthropic_adapter_uses_system_tool_use_and_tool_result_blocks() {
     assert_eq!(payload["messages"][2]["content"][0]["tool_use_id"], "call_read");
     assert_eq!(payload["tools"][0]["name"], "read_files");
     assert_eq!(payload["tools"][0]["input_schema"]["required"][0], "files");
+}
+
+#[test]
+fn anthropic_adapter_converts_multimodal_user_content_parts() {
+    let payload = build_anthropic_messages_payload(
+        "claude-test",
+        &json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看看附件"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]
+            }],
+            "tools": []
+        }),
+    )
+    .expect("payload should be valid");
+
+    assert_eq!(payload["messages"][0]["content"][0], json!({"type": "text", "text": "看看附件"}));
+    assert_eq!(
+        payload["messages"][0]["content"][1],
+        json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": "AAAA"
+            }
+        })
+    );
 }
 
 #[test]

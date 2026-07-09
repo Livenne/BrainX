@@ -6,6 +6,7 @@ import java.util.List;
 public record ClientBindCodeRecord(
     String code,
     String userId,
+    String daemonId,
     String workspaceId,
     String deviceName,
     List<String> capabilities,
@@ -13,6 +14,6 @@ public record ClientBindCodeRecord(
     Instant usedAt
 ) {
   public ClientBindCodeRecord used(Instant now) {
-    return new ClientBindCodeRecord(code, userId, workspaceId, deviceName, capabilities, expiresAt, now);
+    return new ClientBindCodeRecord(code, userId, daemonId, workspaceId, deviceName, capabilities, expiresAt, now);
   }
 }

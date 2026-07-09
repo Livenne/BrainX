@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChatSession, ExecutionEvent } from '../domain/types';
 import {
   completeClientBind,
+  cancelChatSession,
+  createChatSession,
+  deleteChatSession,
+  forkChatSession,
   getChatSession,
+  getChatSessionById,
+  getChatSessions,
   getClientDaemons,
   getWorkspaces,
   getRunEvents,
@@ -15,6 +21,9 @@ import {
   rejectToolRequest,
   sendChatCommand,
   sendChatMessage,
+  sendSessionChatCommand,
+  sendSessionChatMessage,
+  renameChatSession,
   unbindClientDaemon,
   updateApprovalPolicy
 } from '../services/brainxApi';
@@ -73,11 +82,80 @@ describe('brainx real chat API', () => {
     });
   });
 
+  it('uses session-scoped chat endpoints for multi-session operations', async () => {
+    const fetch = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith('/chat/sessions') && init?.method !== 'POST') return okJson([session]);
+      if (url.endsWith('/chat/sessions') && init?.method === 'POST') return okJson({ ...session, id: 'chat_new', title: null });
+      return okJson({ ...session, id: 'chat_new' });
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    await getChatSessions('w_core');
+    await getChatSessionById('w_core', 'chat_new');
+    await createChatSession('w_core');
+    await sendSessionChatMessage('w_core', 'chat_new', 'Hello session');
+    await sendSessionChatCommand('w_core', 'chat_new', 'compact', { activeSessionId: 'chat_new' });
+    await renameChatSession('w_core', 'chat_new', 'Agent loop notes');
+    await forkChatSession('w_core', 'chat_new');
+    await cancelChatSession('w_core', 'chat_new');
+    await deleteChatSession('w_core', 'chat_new');
+
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/v1/workspaces/w_core/chat/sessions', {
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' }
+    });
+    expect(fetch).toHaveBeenNthCalledWith(2, '/api/v1/workspaces/w_core/chat/sessions/chat_new', {
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' }
+    });
+    expect(fetch).toHaveBeenNthCalledWith(3, '/api/v1/workspaces/w_core/chat/sessions', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    expect(fetch).toHaveBeenNthCalledWith(4, '/api/v1/workspaces/w_core/chat/sessions/chat_new/messages', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: 'Hello session', attachments: [] })
+    });
+    expect(fetch).toHaveBeenNthCalledWith(5, '/api/v1/workspaces/w_core/chat/sessions/chat_new/commands', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'compact', arguments: { activeSessionId: 'chat_new' } })
+    });
+    expect(fetch).toHaveBeenNthCalledWith(6, '/api/v1/workspaces/w_core/chat/sessions/chat_new', {
+      method: 'PATCH',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: 'Agent loop notes' })
+    });
+    expect(fetch).toHaveBeenNthCalledWith(7, '/api/v1/workspaces/w_core/chat/sessions/chat_new/fork', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    expect(fetch).toHaveBeenNthCalledWith(8, '/api/v1/workspaces/w_core/chat/sessions/chat_new/cancel', {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    expect(fetch).toHaveBeenNthCalledWith(9, '/api/v1/workspaces/w_core/chat/sessions/chat_new?confirm=true', {
+      method: 'DELETE',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' }
+    });
+  });
+
   it('sends a user message to the workspace chat endpoint', async () => {
     const fetch = vi.fn(() => okJson({ ...session, runStatus: 'waiting_for_client' }));
     vi.stubGlobal('fetch', fetch);
 
-    const result = await sendChatMessage('w_core', 'Inspect workspace');
+    const result = await sendChatMessage('w_core', 'Inspect workspace', [
+      {
+        id: 'att_1',
+        name: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 5,
+        kind: 'text',
+        content: 'hello'
+      }
+    ]);
 
     expect(result.runStatus).toBe('waiting_for_client');
     expect(fetch).toHaveBeenCalledWith('/api/v1/workspaces/w_core/chat/messages', {
@@ -86,7 +164,19 @@ describe('brainx real chat API', () => {
         Accept: 'application/json',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ content: 'Inspect workspace' })
+      body: JSON.stringify({
+        content: 'Inspect workspace',
+        attachments: [
+          {
+            id: 'att_1',
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 5,
+            kind: 'text',
+            content: 'hello'
+          }
+        ]
+      })
     });
   });
 

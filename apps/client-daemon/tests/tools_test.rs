@@ -65,9 +65,115 @@ fn get_environment_reports_runtime_without_provider_details() {
     assert!(result["dateTime"]["iso"].as_str().unwrap_or_default().contains('T'));
     assert!(result["dateTime"]["timezone"].as_str().unwrap_or_default().len() > 1);
     assert!(result["dateTime"]["utcOffset"].as_str().unwrap_or_default().starts_with(['+', '-']));
-    assert_eq!(result["model"]["name"], "stepfun-ai/step-3.7-flash");
+    assert_eq!(result["model"]["name"], "nvidia-step");
+    assert_eq!(result["model"]["model"], "stepfun-ai/step-3.7-flash");
     assert!(result["model"].get("provider").is_none());
     assert!(result["model"].get("baseUrl").is_none());
+}
+
+#[test]
+fn get_environment_reports_selected_request_model() {
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path()).with_active_model_info("gpt-5.5", "gpt-5.5");
+
+    let result = tools.execute("get_env", &json!({})).expect("environment should load");
+
+    assert_eq!(result["model"]["name"], "gpt-5.5");
+    assert_eq!(result["model"]["model"], "gpt-5.5");
+}
+
+#[test]
+fn skill_inventory_scans_project_and_global_skill_markdown() {
+    let workspace = tempfile::tempdir().unwrap();
+    let global = tempfile::tempdir().unwrap();
+    let project_skill = workspace.path().join(".agents/skills/debug-rust/SKILL.md");
+    let global_skill = global.path().join(".agents/skills/write-plan/SKILL.md");
+    fs::create_dir_all(project_skill.parent().unwrap()).unwrap();
+    fs::create_dir_all(global_skill.parent().unwrap()).unwrap();
+    fs::write(
+        &project_skill,
+        "---\nname: debug-rust\ndescription: Debug Rust test failures\nversion: 1\ntriggers:\n  - cargo test\n---\n# Debug Rust\n",
+    )
+    .unwrap();
+    fs::write(
+        &global_skill,
+        "---\nname: write-plan\ndescription: Write implementation plans\n---\n# Write Plan\n",
+    )
+    .unwrap();
+    let tools = WorkspaceTools::new(workspace.path()).with_global_skill_root(global.path().join(".agents/skills"));
+
+    let inventory = tools.skill_inventory().expect("skills should scan");
+
+    assert_eq!(inventory["project"][0]["name"], "debug-rust");
+    assert_eq!(inventory["project"][0]["description"], "Debug Rust test failures");
+    assert_eq!(inventory["project"][0]["path"], project_skill.display().to_string());
+    assert_eq!(inventory["global"][0]["name"], "write-plan");
+    assert_eq!(inventory["global"][0]["scope"], "global");
+}
+
+#[test]
+fn create_and_renovation_skill_return_proposals_without_writing_files() {
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+    let target = workspace.path().join(".agents/skills/new-skill/SKILL.md");
+
+    let created = tools
+        .execute(
+            "create_skill",
+            &json!({
+                "scope": "project",
+                "path": target,
+                "content": "---\nname: new-skill\ndescription: New skill\n---\n# New Skill\n",
+                "reason": "Reusable workflow",
+                "evidence": ["session summary"]
+            }),
+        )
+        .expect("create_skill should produce proposal");
+    let renovated = tools
+        .execute(
+            "renovation_skill",
+            &json!({
+                "path": target,
+                "content": "---\nname: new-skill\ndescription: Updated skill\n---\n# New Skill\n",
+                "reason": "Improve workflow"
+            }),
+        )
+        .expect("renovation_skill should produce proposal");
+
+    assert_eq!(created["proposalType"], "create_skill");
+    assert_eq!(renovated["proposalType"], "renovation_skill");
+    assert!(!target.exists(), "skill proposal tools must not write files before approval");
+}
+
+#[test]
+fn skill_apply_writes_only_under_skill_roots_after_path_normalization() {
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+    let target = workspace.path().join(".agents/skills/new-skill/SKILL.md");
+
+    let applied = tools
+        .execute(
+            "skill.apply",
+            &json!({
+                "path": target,
+                "content": "# New Skill\n"
+            }),
+        )
+        .expect("approved skill should write under .agents/skills");
+
+    assert_eq!(applied["bytes"], "# New Skill\n".len());
+    assert_eq!(fs::read_to_string(&target).unwrap(), "# New Skill\n");
+
+    let traversal = workspace.path().join(".agents/skills/../outside/SKILL.md");
+    let rejected = tools.execute(
+        "skill.apply",
+        &json!({
+            "path": traversal,
+            "content": "# Outside\n"
+        }),
+    );
+
+    assert_error_contains(rejected, "skill.apply target must be under project .agents/skills or global ~/.agents/skills");
 }
 
 #[test]
@@ -101,6 +207,250 @@ fn execute_web_search_returns_mock_result_without_network() {
     assert_eq!(result["query"], "agent toolcall rendering");
     assert!(result["results"].as_array().expect("results").len() >= 1);
     assert!(result["results"][0]["title"].as_str().unwrap_or_default().contains("Mock"));
+}
+
+#[test]
+fn execute_read_file_allows_absolute_path_outside_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    fs::write(outside.path(), "one\ntwo\nthree\n").unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let result = tools
+        .execute("read_file", &json!({"path": outside.path(), "offset": 2, "limit": 1}))
+        .expect("read_file may read outside workspace");
+
+    assert_eq!(result["path"], outside.path().to_string_lossy().as_ref());
+    assert_eq!(result["content"], "two");
+    assert_eq!(result["startLine"], 2);
+}
+
+#[test]
+fn execute_write_and_edit_file_reject_paths_outside_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::NamedTempFile::new().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let write = tools.execute("write_file", &json!({"path": outside.path(), "content": "new"}));
+    let edit = tools.execute(
+        "edit_file",
+        &json!({"path": outside.path(), "old_string": "old", "new_string": "new"}),
+    );
+
+    assert_error_contains(write, "outside workspace");
+    assert_error_contains(edit, "outside workspace");
+}
+
+#[test]
+fn execute_edit_file_replaces_unique_string_inside_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    fs::write(workspace.path().join("note.md"), "alpha\nbeta\ngamma\n").unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let result = tools
+        .execute(
+            "edit_file",
+            &json!({"path": "note.md", "old_string": "beta", "new_string": "delta"}),
+        )
+        .expect("edit_file should replace unique text");
+
+    assert_eq!(result["path"], "note.md");
+    assert!(result["diff"].as_str().unwrap().contains("-beta"));
+    assert_eq!(fs::read_to_string(workspace.path().join("note.md")).unwrap(), "alpha\ndelta\ngamma\n");
+}
+
+#[test]
+fn execute_list_directory_and_search_content_support_new_names() {
+    let workspace = tempfile::tempdir().unwrap();
+    fs::create_dir_all(workspace.path().join("src")).unwrap();
+    fs::write(workspace.path().join("src/main.ts"), "const marker = 'brainx';\n").unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let listed = tools
+        .execute("list_directory", &json!({"path": ".", "recursive": true, "max_depth": 2}))
+        .expect("list_directory should succeed");
+    let searched = tools
+        .execute("search_content", &json!({"pattern": "brainx", "path": ".", "max_results": 5}))
+        .expect("search_content should succeed");
+
+    assert!(listed["entries"].to_string().contains("src/main.ts"));
+    assert_eq!(searched["matches"][0]["path"], "src/main.ts");
+}
+
+#[test]
+fn workspace_tools_expand_home_relative_roots() {
+    let tools = WorkspaceTools::new("~");
+
+    let result = tools.execute("list_directory", &json!({"path": ".", "recursive": false}));
+
+    assert!(result.is_ok(), "expected ~ to resolve to the user home directory: {result:?}");
+}
+
+#[test]
+fn execute_run_command_uses_workdir_and_rejects_outside_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let ok = tools
+        .execute("run_command", &json!({"command": "printf brainx", "workdir": ".", "timeout": 5}))
+        .expect("run_command should accept new workdir and timeout fields");
+    let rejected = tools.execute(
+        "run_command",
+        &json!({"command": "printf no", "workdir": outside.path(), "timeout": 5}),
+    );
+
+    assert_eq!(ok["stdout"], "brainx");
+    assert_error_contains(rejected, "outside workspace");
+}
+
+#[test]
+fn execute_todo_tools_create_update_and_list_tasks() {
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let created = tools
+        .execute(
+            "todo_create",
+            &json!({
+                "tasks": [
+                    {"id": "1", "title": "Inspect code", "status": "pending"},
+                    {"id": "2", "title": "Run tests", "dependencies": ["1"]}
+                ]
+            }),
+        )
+        .expect("todo_create should succeed");
+    let updated = tools
+        .execute("todo_update", &json!({"task_id": "1", "status": "completed"}))
+        .expect("todo_update should succeed");
+    let listed = tools
+        .execute("todo_list", &json!({"filter": "completed"}))
+        .expect("todo_list should succeed");
+
+    assert_eq!(created["tasks"].as_array().unwrap().len(), 2);
+    assert_eq!(updated["task"]["status"], "completed");
+    assert_eq!(listed["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["tasks"][0]["id"], "1");
+}
+
+#[test]
+fn workspace_tools_can_share_todo_state_across_request_instances() {
+    let workspace = tempfile::tempdir().unwrap();
+    let runtime = brainx_client_daemon::tools::ToolRuntimeState::default();
+    let first_request_tools = WorkspaceTools::new_with_state(workspace.path(), runtime.clone());
+    let second_request_tools = WorkspaceTools::new_with_state(workspace.path(), runtime);
+
+    first_request_tools
+        .execute(
+            "todo_create",
+            &json!({
+                "tasks": [
+                    {"id": "1", "title": "Persist across requests", "status": "pending"}
+                ]
+            }),
+        )
+        .expect("todo_create should succeed");
+    let listed = second_request_tools
+        .execute("todo_list", &json!({"filter": "all"}))
+        .expect("todo_list should read shared state");
+
+    assert_eq!(listed["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["tasks"][0]["title"], "Persist across requests");
+}
+
+#[test]
+fn workspace_tools_can_share_terminal_state_across_request_instances() {
+    let workspace = tempfile::tempdir().unwrap();
+    let runtime = brainx_client_daemon::tools::ToolRuntimeState::default();
+    let first_request_tools = WorkspaceTools::new_with_state(workspace.path(), runtime.clone());
+    let second_request_tools = WorkspaceTools::new_with_state(workspace.path(), runtime);
+
+    first_request_tools
+        .execute(
+            "terminal_spawn",
+            &json!({
+                "terminal_id": "term_shared",
+                "command": "read line; printf \"shared:$line\\n\"",
+                "workdir": "."
+            }),
+        )
+        .expect("terminal_spawn should start");
+    second_request_tools
+        .execute("terminal_input", &json!({"terminal_id": "term_shared", "input_text": "hello\n"}))
+        .expect("terminal_input should find shared terminal");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let output = second_request_tools
+        .execute("terminal_output", &json!({"terminal_id": "term_shared", "lines": 20}))
+        .expect("terminal_output should read shared terminal output");
+
+    assert!(output["output"].as_str().unwrap_or_default().contains("shared:hello"));
+}
+
+#[test]
+fn execute_ask_user_returns_pending_question_payload() {
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let result = tools
+        .execute(
+            "ask_user",
+            &json!({
+                "question": "Which option should I use?",
+                "question_type": "preference",
+                "options": ["A", "B"],
+                "context_note": "Need a user decision."
+            }),
+        )
+        .expect("ask_user should produce a pause payload");
+
+    assert_eq!(result["status"], "waiting_for_user");
+    assert_eq!(result["question"], "Which option should I use?");
+    assert_eq!(result["options"][0], "A");
+}
+
+#[test]
+fn execute_terminal_tools_spawn_input_output_list_and_kill() {
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let spawned = tools
+        .execute(
+            "terminal_spawn",
+            &json!({
+                "terminal_id": "term_test",
+                "command": "read line; printf \"got:$line\\n\"",
+                "workdir": "."
+            }),
+        )
+        .expect("terminal_spawn should start");
+    assert_eq!(spawned["terminalId"], "term_test");
+
+    tools
+        .execute("terminal_input", &json!({"terminal_id": "term_test", "input_text": "hello\n"}))
+        .expect("terminal_input should write to process stdin");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let output = tools
+        .execute("terminal_output", &json!({"terminal_id": "term_test", "lines": 20}))
+        .expect("terminal_output should read buffered output");
+    let listed = tools.execute("terminal_list", &json!({})).expect("terminal_list should work");
+
+    assert!(output["output"].as_str().unwrap_or_default().contains("got:hello"));
+    assert!(listed["terminals"].to_string().contains("term_test"));
+
+    let sleeper = tools
+        .execute(
+            "terminal_spawn",
+            &json!({"terminal_id": "term_sleep", "command": "sleep 5", "workdir": "."}),
+        )
+        .expect("second terminal should start");
+    assert_eq!(sleeper["status"], "running");
+    let killed = tools
+        .execute("terminal_kill", &json!({"terminal_id": "term_sleep"}))
+        .expect("terminal_kill should stop a running process");
+    assert_eq!(killed["status"], "stopped");
+
+    let listed_after_kill = tools.execute("terminal_list", &json!({})).expect("terminal_list should work after kill");
+    assert!(!listed_after_kill["terminals"].to_string().contains("term_sleep"));
 }
 
 #[test]
@@ -228,13 +578,19 @@ fn execute_background_read_caps_large_requested_output() {
         .expect("background_start should succeed");
     let task_id = started["taskId"].as_str().expect("task id").to_string();
 
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let read = tools
-        .execute(
-            "background_read",
-            &json!({"taskId": task_id, "cursor": 0, "maxBytes": 1_000_000}),
-        )
-        .expect("background_read should succeed");
+    let mut read = json!({});
+    for _ in 0..20 {
+        read = tools
+            .execute(
+                "background_read",
+                &json!({"taskId": task_id, "cursor": 0, "maxBytes": 1_000_000}),
+            )
+            .expect("background_read should succeed");
+        if read["chunks"].as_array().map(|chunks| !chunks.is_empty()).unwrap_or(false) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let chunks = read["chunks"].as_array().expect("chunks");
     let text = chunks[0]["text"].as_str().expect("chunk text");
 
@@ -272,13 +628,26 @@ fn execute_read_files_reads_one_or_many_files_with_line_ranges() {
 }
 
 #[test]
-fn execute_read_files_rejects_old_read_tools_and_aliases() {
+fn execute_read_files_reports_directories_as_list_directory_targets() {
+    let workspace = tempfile::tempdir().unwrap();
+    fs::create_dir_all(workspace.path().join("src")).unwrap();
+    let tools = WorkspaceTools::new(workspace.path());
+
+    let result = tools
+        .execute("read_files", &json!({"files": [{"path": "src"}]}))
+        .expect("read_files should report per-file failures without failing the batch");
+
+    assert_eq!(result["files"][0]["ok"], false);
+    let error = result["files"][0]["error"].as_str().expect("error");
+    assert!(error.contains("path is a directory"));
+    assert!(error.contains("list_directory"));
+}
+
+#[test]
+fn execute_read_files_rejects_old_many_read_tool_and_aliases() {
     let workspace = tempfile::tempdir().unwrap();
     fs::write(workspace.path().join("README.md"), "one\ntwo\n").unwrap();
     let tools = WorkspaceTools::new(workspace.path());
-
-    let old_single = tools.execute("read_file", &json!({"path": "README.md"}));
-    assert_error_contains(old_single, "unsupported tool");
 
     let old_many = tools.execute("read_many_files", &json!({"files": [{"path": "README.md"}]}));
     assert_error_contains(old_many, "unsupported tool");
@@ -331,12 +700,16 @@ fn execute_write_file_requires_explicit_overwrite() {
 }
 
 #[test]
-fn execute_write_file_rejects_missing_overwrite_and_removed_preview_fields() {
+fn execute_write_file_defaults_to_full_overwrite_and_rejects_removed_preview_fields() {
     let workspace = tempfile::tempdir().unwrap();
+    fs::write(workspace.path().join("note.md"), "old").unwrap();
     let tools = WorkspaceTools::new(workspace.path());
 
-    let missing_overwrite = tools.execute("write_file", &json!({"path": "note.md", "content": "new"}));
-    assert_error_contains(missing_overwrite, "write_file requires input.overwrite");
+    let overwritten = tools
+        .execute("write_file", &json!({"path": "note.md", "content": "new"}))
+        .expect("write_file should overwrite by default");
+    assert_eq!(overwritten["path"], "note.md");
+    assert_eq!(fs::read_to_string(workspace.path().join("note.md")).unwrap(), "new");
 
     let old_preview_fields = tools.execute(
         "write_file",
@@ -505,6 +878,10 @@ fn execute_background_stop_terminates_running_task() {
 
     assert_eq!(stopped["taskId"], task_id);
     assert_eq!(stopped["status"], "stopped");
+
+    let read_after_stop = tools.execute("background_read", &json!({"taskId": task_id, "cursor": 0, "maxBytes": 100}));
+    assert!(read_after_stop.is_err());
+    assert!(read_after_stop.unwrap_err().to_string().contains("background task not found"));
 }
 
 #[test]

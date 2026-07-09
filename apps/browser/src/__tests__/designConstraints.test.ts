@@ -48,4 +48,17 @@ describe('visual design constraints', () => {
     expect(chatCss).not.toContain('#7c3aed');
     expect(chatCss).not.toContain('#ec4899');
   });
+
+  it('keeps composer menus compact and session menus rectangular', () => {
+    const chatCss = readSource('pages/ChatPreviewPage.css');
+
+    expect(chatCss).toMatch(/\.composer-action-popover\s*\{[^}]*max-height:\s*min\(calc\(\(38px \+ 6px\) \* 7 \+ 16px\), 42vh\);/s);
+    expect(chatCss).toMatch(/\.composer-action-popover\s*\{[^}]*overflow-y:\s*auto;/s);
+    expect(chatCss).toContain('.composer-action-popover::-webkit-scrollbar');
+    expect(chatCss).toContain('.composer-action-popover::-webkit-scrollbar-thumb');
+    expect(chatCss).toMatch(/\.chat-session-trigger\s*\{[^}]*border-radius:\s*var\(--radius-card\);/s);
+    expect(chatCss).toMatch(/\.chat-session-popover\s*\{[^}]*border-radius:\s*var\(--radius-card\);/s);
+    expect(chatCss).not.toMatch(/\.chat-session-trigger\s*\{[^}]*border-radius:\s*999px;/s);
+    expect(chatCss).not.toMatch(/\.chat-session-popover\s*\{[^}]*border-radius:\s*999px;/s);
+  });
 });

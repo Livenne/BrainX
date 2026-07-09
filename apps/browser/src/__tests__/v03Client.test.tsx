@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -47,6 +47,7 @@ describe('v0.3 Client management', () => {
     await user.type(within(localDevice).getByRole('textbox', { name: 'Device note' }), 'Allowed for browser tests');
     await user.click(within(localDevice).getByRole('button', { name: 'Save note' }));
     expect(await within(localDevice).findByText('Allowed for browser tests')).toBeInTheDocument();
+    await waitFor(() => expect(within(localDevice).getByRole('button', { name: 'Save note' })).not.toHaveAttribute('aria-busy'));
 
     const newDevice = screen.getByRole('article', { name: 'New Client Device' });
     await user.click(within(newDevice).getByRole('button', { name: 'Delete client' }));

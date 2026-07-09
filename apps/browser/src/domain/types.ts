@@ -16,10 +16,35 @@ export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'ca
 export type BranchStatus = 'active' | 'paused' | 'adopted' | 'archived';
 export type SkillDraftStatus = 'draft' | 'review_requested' | 'approved' | 'published' | 'rejected';
 export type ChatMessageRole = 'user' | 'assistant' | 'system' | 'tool';
+export type MessageContentPart =
+  | {
+      type: 'text';
+      text: string;
+    }
+  | {
+      type: 'image_url';
+      image_url: {
+        url: string;
+      };
+    };
+
+export type ChatAttachmentInput = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  kind: 'text' | 'image' | 'file';
+  content?: string;
+  dataUrl?: string;
+};
 export type ChatToolKind =
   | 'get_env'
   | 'get_environment'
+  | 'read_file'
   | 'read_files'
+  | 'edit_file'
+  | 'search_content'
+  | 'list_directory'
   | 'search_workspace'
   | 'web_search'
   | 'apply_patch'
@@ -27,6 +52,13 @@ export type ChatToolKind =
   | 'run_command'
   | 'ask_user'
   | 'todo_update'
+  | 'todo_create'
+  | 'todo_list'
+  | 'terminal_spawn'
+  | 'terminal_output'
+  | 'terminal_input'
+  | 'terminal_kill'
+  | 'terminal_list'
   | 'background_start'
   | 'background_read'
   | 'background_stop'
@@ -150,6 +182,40 @@ export type SkillDraft = {
   riskSummary: string;
 };
 
+export type SkillSummary = {
+  id: string;
+  scope: 'project' | 'global' | string;
+  name: string;
+  description: string;
+  path: string;
+  version?: string;
+  triggers?: string[];
+  updatedAt?: string;
+};
+
+export type SkillInventory = {
+  project: SkillSummary[];
+  global: SkillSummary[];
+};
+
+export type SkillProposal = {
+  id: string;
+  workspaceId: string;
+  runId?: string;
+  daemonId?: string;
+  name: string;
+  scope: 'project' | 'global' | string;
+  path: string;
+  markdownContent: string;
+  reason: string;
+  evidence: string[];
+  confidence: number;
+  status: SkillDraftStatus | 'review_requested' | 'apply_failed';
+  version: number;
+  createdAt: string;
+  reviewedAt?: string | null;
+};
+
 export type ClientDaemon = {
   id: string;
   workspaceId?: string;
@@ -211,13 +277,13 @@ export type AskUserAnswer = {
 export type AgentTodoItem = {
   id: string;
   label: string;
-  status: 'pending' | 'running' | 'completed' | 'blocked';
+  status: 'pending' | 'running' | 'in_progress' | 'completed' | 'blocked' | 'cancelled';
 };
 
 export type BackgroundTerminal = {
   id: string;
   title: string;
-  status: 'idle' | 'running' | 'waiting_for_approval' | 'failed';
+  status: 'idle' | 'running' | 'waiting_for_approval' | 'failed' | 'stopped' | 'completed';
   lines: string[];
 };
 
@@ -230,8 +296,10 @@ export type AgentSubagent = {
 
 export type OpenAiToolCall = {
   id: string;
-  type: 'function';
-  function: {
+  type?: 'function';
+  name?: string;
+  arguments?: unknown;
+  function?: {
     name: string;
     arguments: string;
   };
@@ -240,22 +308,47 @@ export type OpenAiToolCall = {
 export type ChatMessage =
   | {
       role: 'system' | 'user';
-      content: string;
+      content: string | MessageContentPart[];
+      attachments?: ChatAttachmentInput[];
+      status?: 'failed' | 'sent';
+      error?: {
+        code?: string;
+        message: string;
+      } | null;
     }
   | {
       role: 'assistant';
       content: string | null;
+      thinking?: string;
       tool_calls?: OpenAiToolCall[];
+      toolCalls?: OpenAiToolCall[];
     }
   | {
       role: 'tool';
-      tool_call_id: string;
+      tool_call_id?: string;
+      toolCallId?: string;
       name: string;
       content: string;
     };
 
+export type ChatTimelineNotice = {
+  id: string;
+  kind:
+    | 'model_changed'
+    | 'workspace_changed'
+    | 'context_cleared'
+    | 'context_compaction_requested'
+    | 'context_compacted'
+    | 'context_compact_skipped'
+    | string;
+  message: string;
+  detail?: string;
+  messageIndex?: number;
+  createdAt: string;
+};
+
 export type ToolState = {
-  status: 'queued' | 'waiting' | 'running' | 'completed' | 'failed';
+  status: 'queued' | 'waiting' | 'waiting_for_user' | 'waiting_for_approval' | 'running' | 'completed' | 'failed';
   executionId?: string;
   riskTier?: RiskTier | string;
   expiresAt?: string;
@@ -267,8 +360,13 @@ export type ToolState = {
 
 export type ChatSession = {
   id: string;
-  title: string;
+  title: string | null;
+  parentSessionId?: string | null;
+  rootSessionId?: string | null;
+  forkedFromSessionId?: string | null;
+  workspaceId?: string;
   workspaceName: string;
+  currentWorkspace?: string;
   agentId: string;
   agentName: string;
   branchName: string;
@@ -295,6 +393,14 @@ export type ChatSession = {
     contextWindow?: number;
   }>;
   activeModelName?: string;
+  timelineNotices?: ChatTimelineNotice[];
+  queuedInputs?: Array<{
+    id: string;
+    content: string;
+    attachments?: ChatAttachmentInput[];
+    createdAt?: string;
+  }>;
+  createdAt?: string;
   updatedAt: string;
   messages: ChatMessage[];
 };

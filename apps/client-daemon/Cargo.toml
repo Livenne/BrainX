@@ -5,6 +5,10 @@ edition = "2021"
 description = "brainx C-side local daemon prototype"
 license = "UNLICENSED"
 
+[[bin]]
+name = "brainx"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

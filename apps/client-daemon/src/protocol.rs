@@ -113,6 +113,18 @@ pub struct ExecutionResultPayload {
     pub data: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionStreamEventPayload {
+    pub execution_id: String,
+    pub run_id: String,
+    pub sequence: usize,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub content_delta: String,
+    pub payload: Value,
+}
+
 impl ExecutionResultPayload {
     pub fn completed(execution_id: impl Into<String>, summary: impl Into<String>, data: Value) -> Self {
         Self {

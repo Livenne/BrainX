@@ -16,8 +16,10 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -27,18 +29,50 @@ public class BrainxState {
   private static final String DEV_AGENT_ID = "a_core";
   private static final String DEV_BRANCH_ID = "br_core";
   private static final String DEV_CHAT_SESSION_ID = "chat_main";
+  private static final String DEFAULT_CURRENT_WORKSPACE = "~/.brainx/workspace";
   private static final ObjectMapper JSON = new ObjectMapper();
   private static final SecureRandom RANDOM = new SecureRandom();
   private static final Set<String> SAFE_TOOLS = Set.of("get_env", "read_files", "search_workspace", "web_search", "background_read", "ask_user", "todo_update", "subagent_start", "subagent_read", "subagent_stop");
   private static final Set<String> RISKY_TOOLS = Set.of("apply_patch", "write_file", "run_command", "background_start", "background_stop");
   private static final Set<String> BROWSER_TOOLS = Set.of("ask_user");
   private static final Set<String> SERVER_TOOLS = Set.of("todo_update", "subagent_start", "subagent_read", "subagent_stop");
-  private static final Set<String> LOCAL_TOOLS = Set.of("get_env", "read_files", "search_workspace", "web_search", "apply_patch", "write_file", "run_command", "background_start", "background_read", "background_stop");
+  private static final Set<String> LOCAL_TOOLS = Set.of("get_env", "read_files", "search_workspace", "web_search", "apply_patch", "write_file", "run_command", "background_start", "background_read", "background_stop", "skill.apply");
   private static final Set<String> SUPPORTED_TOOLS = union(union(LOCAL_TOOLS, BROWSER_TOOLS), SERVER_TOOLS);
   private static final Set<String> ZERO_ARGUMENT_TOOLS = Set.of("get_env");
+  private static final Set<String> CHAT_COMMANDS = Set.of("compact", "clear", "new", "model", "session", "fork", "init", "rename", "delete", "workspace");
   private static final String DEFAULT_MODEL_NAME = "nvidia-step";
   private static final int DEFAULT_CONTEXT_WINDOW = 128_000;
   private static final int MAX_TOOL_RESULT_MESSAGE_CHARS = 64_000;
+  private static final int MAX_ATTACHMENTS_PER_MESSAGE = 15;
+  private static final int MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+  private static final int MAX_TEXT_ATTACHMENT_BYTES = 512 * 1024;
+  private static final int MAX_TOTAL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+  private static final String AGENT_LOOP_SYSTEM_PROMPT = """
+      You are brainx, a local coding agent for project work.
+
+      Operating model:
+      - You work through a browser/server/client architecture. The server provides the conversation context. The local client executes model requests and local tools.
+      - Use only the tools explicitly available in the current request. Do not invent tools, aliases, APIs, or hidden capabilities.
+      - If a capability is not available, say so plainly and continue with the best available approach.
+      - Respond in the user's language unless the user asks otherwise.
+
+      Core behavior:
+      - For ordinary conversation, conceptual questions, or stable knowledge already present in context, answer directly without tool calls.
+      - For workspace facts, file contents, command results, current environment, or verification, use tools instead of guessing.
+      - Explore before changing files. Read the relevant file content before write_file or edit_file.
+      - Keep changes minimal and scoped to the user's request.
+      - Use todo tools for non-trivial multi-step work. Keep the task list short and current.
+      - Use run_command only for short, non-interactive commands. Use terminal tools for long-running, watch, server, or interactive processes.
+      - When tool calls fail, read the error, adjust if possible, and continue. Do not hide tool failures.
+      - Do not claim that a command, file change, test, or tool action happened unless the corresponding tool result is present.
+      - When work is complete, summarize what changed and include concrete verification evidence when available.
+
+      Safety and boundaries:
+      - Do not reveal secrets, API keys, tokens, or private credentials.
+      - Do not run destructive commands or overwrite files unless the user requested that class of change or the task clearly requires it.
+      - Reads may inspect necessary paths, but writes and command execution must stay within the current workspace as enforced by the runtime.
+      - Ask the user only when blocked by missing intent, preference, approval, or external information that cannot be discovered from available tools.
+      """;
 
   private final long askUserTimeoutSeconds;
   private final Map<String, WorkspaceRecord> workspaces = new LinkedHashMap<>();
@@ -57,11 +91,14 @@ public class BrainxState {
   private final Map<String, Map<String, Object>> lastTokenUsageByWorkspace = new LinkedHashMap<>();
   private final Map<String, ExecutionRequestRecord> executionRequests = new LinkedHashMap<>();
   private final Map<String, SkillProposalRecord> skillProposals = new LinkedHashMap<>();
+  private final Map<String, Map<String, Object>> skillInventoryByDaemon = new LinkedHashMap<>();
+  private final Map<String, String> skillProposalExecutionIds = new LinkedHashMap<>();
   private final Map<String, Map<String, Object>> subagentTasks = new LinkedHashMap<>();
   private final Map<String, ChatSessionRecord> chatSessions = new LinkedHashMap<>();
   private final Map<String, String> chatSessionIdsByRun = new LinkedHashMap<>();
   private final Map<String, List<RunStepRecord>> runSteps = new LinkedHashMap<>();
   private final Map<String, List<ExecutionEventRecord>> executionEvents = new LinkedHashMap<>();
+  private final Set<String> streamEventKeys = new HashSet<>();
 
   private record NormalizedToolCall(String callId, String toolName, Map<String, Object> arguments) {}
 
@@ -123,9 +160,33 @@ public class BrainxState {
     bindCodes.put(code, new ClientBindCodeRecord(
         code,
         user.id(),
+        null,
         workspaceId,
         deviceName,
         List.copyOf(capabilities == null ? List.of() : capabilities),
+        expiresAt,
+        null
+    ));
+    return new BindCodeResponse(code, expiresAt);
+  }
+
+  public synchronized BindCodeResponse createBindCodeForDaemon(String daemonId) {
+    var daemon = requireDaemon(daemonId);
+    if (!"active".equals(daemon.status())) {
+      throw new ForbiddenException("Client daemon is not active.");
+    }
+    if (daemon.userId() != null && !daemon.userId().isBlank()) {
+      throw new StateConflictException("Client daemon is already bound.");
+    }
+    var code = uniqueBindCode();
+    var expiresAt = Instant.now().plus(5, ChronoUnit.MINUTES);
+    bindCodes.put(code, new ClientBindCodeRecord(
+        code,
+        null,
+        daemon.id(),
+        daemon.workspaceId(),
+        daemon.deviceName(),
+        daemon.capabilities(),
         expiresAt,
         null
     ));
@@ -139,7 +200,7 @@ public class BrainxState {
     if (bindCode == null) {
       throw new NotFoundException("Bind code not found.");
     }
-    if (!bindCode.userId().equals(user.id())) {
+    if (bindCode.userId() != null && !bindCode.userId().equals(user.id())) {
       throw new ForbiddenException("Bind code belongs to a different user.");
     }
     var now = Instant.now();
@@ -149,16 +210,18 @@ public class BrainxState {
     if (bindCode.expiresAt().isBefore(now)) {
       throw new StateConflictException("Bind code has expired.");
     }
-    var daemon = new ClientDaemonRecord(
-        id("cd"),
-        bindCode.workspaceId(),
-        user.id(),
-        bindCode.deviceName(),
-        "active",
-        bindCode.capabilities(),
-        now,
-        now
-    );
+    var daemon = bindCode.daemonId() == null || bindCode.daemonId().isBlank()
+        ? new ClientDaemonRecord(
+            id("cd"),
+            bindCode.workspaceId(),
+            user.id(),
+            bindCode.deviceName(),
+            "active",
+            bindCode.capabilities(),
+            now,
+            now
+        )
+        : requireDaemon(bindCode.daemonId()).boundTo(user.id(), now);
     daemons.put(daemon.id(), daemon);
     bindCodes.put(bindCode.code(), bindCode.used(now));
     return daemon;
@@ -180,6 +243,14 @@ public class BrainxState {
     if (daemon.userId() != null && !daemon.userId().equals(user.id())) {
       throw new ForbiddenException("Client daemon belongs to a different user.");
     }
+    daemons.put(daemon.id(), daemon.withStatus("revoked", Instant.now()));
+  }
+
+  public synchronized void unbindDaemon(String daemonId, boolean confirm) {
+    if (!confirm) {
+      throw new BadRequestException("Unbind requires explicit confirmation.");
+    }
+    var daemon = requireDaemon(daemonId);
     daemons.put(daemon.id(), daemon.withStatus("revoked", Instant.now()));
   }
 
@@ -299,66 +370,384 @@ public class BrainxState {
   public synchronized ChatSessionRecord getChatSession(String workspaceId) {
     requireWorkspace(workspaceId);
     expireTimedOutAskUser(Instant.now());
-    return chatSessions.values().stream()
-        .filter(session -> session.workspaceId().equals(workspaceId))
-        .findFirst()
+    return primaryChatSession(workspaceId)
         .map(this::sessionForResponse)
         .orElseThrow(() -> new NotFoundException("Chat session not found."));
   }
 
-  public synchronized ChatSessionRecord sendChatMessage(String workspaceId, String content) {
-    var session = getChatSession(workspaceId);
+  public synchronized List<ChatSessionRecord> chatSessions(String workspaceId) {
+    requireWorkspace(workspaceId);
+    expireTimedOutAskUser(Instant.now());
+    return chatSessions.values().stream()
+        .filter(session -> session.workspaceId().equals(workspaceId))
+        .map(this::sessionForResponse)
+        .toList();
+  }
+
+  public synchronized ChatSessionRecord getChatSession(String workspaceId, String sessionId) {
+    requireWorkspace(workspaceId);
+    expireTimedOutAskUser(Instant.now());
+    var session = requireChatSession(sessionId);
+    if (!workspaceId.equals(session.workspaceId())) {
+      throw new NotFoundException("Chat session not found.");
+    }
+    return sessionForResponse(session);
+  }
+
+  public synchronized ChatSessionRecord createChatSession(String workspaceId, String title) {
+    var workspace = requireWorkspace(workspaceId);
+    var runtime = primaryChatSession(workspaceId).orElseThrow(() -> new NotFoundException("Chat session not found."));
+    var now = Instant.now();
+    var sessionId = id("chat");
+    var session = new ChatSessionRecord(
+        sessionId,
+        normalizedSessionTitle(title),
+        null,
+        sessionId,
+        null,
+        workspace.id(),
+        workspace.name(),
+        runtime.currentWorkspace(),
+        runtime.agentId(),
+        runtime.agentName(),
+        runtime.branchId(),
+        runtime.branchName(),
+        runtime.skillName(),
+        runtime.clientName(),
+        "",
+        "completed",
+        List.of(),
+        List.of(),
+        List.of(),
+        Map.of(),
+        Map.of(),
+        defaultAvailableModels(),
+        activeModelName(workspaceId),
+        List.of(),
+        List.of(),
+        now,
+        now,
+        List.of()
+    );
+    chatSessions.put(session.id(), session);
+    return sessionForResponse(session);
+  }
+
+  public synchronized ChatSessionRecord renameChatSession(String workspaceId, String sessionId, String title) {
+    var session = getRawChatSession(workspaceId, sessionId);
+    var updated = session.withTitle(normalizedSessionTitle(title), Instant.now());
+    chatSessions.put(updated.id(), updated);
+    recordEventForSession(updated, "chat.session.renamed", "Chat session renamed.", Map.of("title", stringValue(updated.title())));
+    return sessionForResponse(updated);
+  }
+
+  public synchronized ChatSessionRecord sendChatMessage(String workspaceId, String content, List<Map<String, Object>> attachments) {
+    var session = primaryChatSession(workspaceId).orElseThrow(() -> new NotFoundException("Chat session not found."));
+    return sendChatMessage(workspaceId, session.id(), content, attachments);
+  }
+
+  public synchronized ChatSessionRecord sendChatMessage(String workspaceId, String sessionId, String content, List<Map<String, Object>> attachments) {
+    var session = getRawChatSession(workspaceId, sessionId);
     if (isActiveRunStatus(session.runStatus())) {
-      throw new StateConflictException("A chat run is already active for this session.");
+      return queueChatInput(session, content, attachments);
     }
 
+    return startChatRun(session, List.of(queuedInputPayload(content, attachments, Instant.now())), content);
+  }
+
+  public synchronized ChatSessionRecord forkChatSession(String workspaceId, String sessionId) {
+    var session = getRawChatSession(workspaceId, sessionId);
+    if (isActiveRunStatus(session.runStatus())) {
+      throw new StateConflictException("Cannot fork a session while its run is active.");
+    }
     var now = Instant.now();
-    var run = new RunRecord(id("run"), workspaceId, session.agentId(), session.branchId(), content, "waiting_for_client", "", now);
+    var forkId = id("chat");
+    var suffix = forkId.substring("chat_".length(), "chat_".length() + 5);
+    var baseTitle = stringValue(session.title()).isBlank() ? "新的会话" : session.title();
+    var forked = new ChatSessionRecord(
+        forkId,
+        baseTitle + " [fork: " + suffix + "]",
+        session.id(),
+        stringValue(session.rootSessionId()).isBlank() ? session.id() : session.rootSessionId(),
+        session.id(),
+        session.workspaceId(),
+        session.workspaceName(),
+        session.currentWorkspace(),
+        session.agentId(),
+        session.agentName(),
+        session.branchId(),
+        session.branchName(),
+        session.skillName(),
+        session.clientName(),
+        "",
+        "completed",
+        session.todos(),
+        session.terminals(),
+        session.subagents(),
+        Map.of(),
+        Map.of(),
+        defaultAvailableModels(),
+        activeModelName(workspaceId),
+        List.of(),
+        session.timelineNotices(),
+        now,
+        now,
+        session.messages()
+    );
+    chatSessions.put(forked.id(), forked);
+    return sessionForResponse(forked);
+  }
+
+  public synchronized void deleteChatSession(String workspaceId, String sessionId, boolean confirm) {
+    if (!confirm) {
+      throw new BadRequestException("Delete session requires explicit confirmation.");
+    }
+    var root = getRawChatSession(workspaceId, sessionId);
+    var idsToDelete = descendantSessionIds(root.id());
+    for (var idToDelete : idsToDelete) {
+      var session = chatSessions.get(idToDelete);
+      if (session != null) {
+        cancelSessionInternal(session, "Session deleted.", false);
+      }
+    }
+    for (var idToDelete : idsToDelete) {
+      chatSessions.remove(idToDelete);
+    }
+    chatSessionIdsByRun.entrySet().removeIf(entry -> idsToDelete.contains(entry.getValue()));
+  }
+
+  public synchronized ChatSessionRecord cancelChatSession(String workspaceId, String sessionId) {
+    var session = getRawChatSession(workspaceId, sessionId);
+    return sessionForResponse(cancelSessionInternal(session, "Run cancelled by user.", true));
+  }
+
+  private ChatSessionRecord queueChatInput(ChatSessionRecord session, String content, List<Map<String, Object>> attachments) {
+    var now = Instant.now();
+    var queuedInputs = new ArrayList<>(session.queuedInputs());
+    var queuedInput = queuedInputPayload(content, attachments, now);
+    queuedInputs.add(Map.copyOf(queuedInput));
+    var updated = session.withQueuedInputs(queuedInputs, now);
+    chatSessions.put(updated.id(), updated);
+    recordEventForSession(
+        session,
+        "chat.message.queued",
+        "Queued user message for next safe turn.",
+        Map.of("queuedInputId", queuedInput.get("id"), "queueSize", queuedInputs.size())
+    );
+    return sessionForResponse(updated);
+  }
+
+  private Map<String, Object> queuedInputPayload(String content, List<Map<String, Object>> attachments, Instant now) {
+    var queuedInput = new LinkedHashMap<String, Object>();
+    queuedInput.put("id", id("qmsg"));
+    queuedInput.put("content", content);
+    queuedInput.put("attachments", normalizeAttachments(attachments));
+    queuedInput.put("createdAt", now.toString());
+    return Map.copyOf(queuedInput);
+  }
+
+  private ChatSessionRecord startChatRun(ChatSessionRecord session, List<Map<String, Object>> inputs, String goal) {
+    var now = Instant.now();
+    var run = new RunRecord(id("run"), session.workspaceId(), session.agentId(), session.branchId(), goal, "waiting_for_client", "", now);
     runs.put(run.id(), run);
     chatSessionIdsByRun.put(run.id(), session.id());
     recordEvent(run.id(), "agent.run.created", "Chat run created.", null);
 
     var messages = new ArrayList<>(session.messages());
-    messages.add(Map.of("role", "user", "content", content));
+    for (var input : inputs) {
+      messages.add(userMessage(stringValue(input.get("content")), asMapList(input.get("attachments"))));
+    }
 
-    var updated = session.withRun(run.id(), run.status(), now).withMessages(messages, run.status(), now);
+    var updated = session.withQueuedInputs(List.of(), now).withRun(run.id(), run.status(), now).withMessages(messages, run.status(), now);
     chatSessions.put(updated.id(), updated);
 
-    var tools = toolsForConversation(updated);
     var execution = ExecutionRequestRecord.modelInvoke(
         id("exec"),
-        workspaceId,
+        session.workspaceId(),
         session.agentId(),
         session.branchId(),
         run.id(),
-        "tool_selection",
+        "agent_loop",
         0,
-        toolSelectionMessages(updated, tools),
-        tools,
-        activeModelName(workspaceId)
+        agentLoopMessages(updated),
+        List.of(),
+        activeModelName(session.workspaceId()),
+        updated.currentWorkspace()
     );
     executionRequests.put(execution.executionId(), execution);
     recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
     recordEvent(
         run.id(),
         "execution.requested",
-        "Requested model tool selection.",
+        "Requested client-side agent loop.",
         execution.riskTier(),
         execution.executionId(),
-        Map.of("toolName", execution.toolName(), "phase", "tool_selection", "tools", toolNames(tools))
+        Map.of("toolName", execution.toolName(), "phase", "agent_loop")
     );
     return sessionForResponse(updated);
   }
 
+  private Map<String, Object> userMessage(String content, List<Map<String, Object>> attachments) {
+    var normalizedAttachments = normalizeAttachments(attachments);
+    if (normalizedAttachments.isEmpty()) {
+      return Map.of("role", "user", "content", content);
+    }
+
+    var parts = new ArrayList<Map<String, Object>>();
+    if (!stringValue(content).isBlank()) {
+      parts.add(Map.of("type", "text", "text", content));
+    }
+    for (var attachment : normalizedAttachments) {
+      var dataUrl = stringValue(attachment.get("dataUrl"));
+      var mimeType = stringValue(attachment.get("mimeType"));
+      var kind = stringValue(attachment.get("kind"));
+      if ((kind.equals("image") || mimeType.startsWith("image/") || dataUrl.startsWith("data:image/")) && !dataUrl.isBlank()) {
+        parts.add(Map.of(
+            "type", "image_url",
+            "image_url", Map.of("url", dataUrl)
+        ));
+      } else {
+        parts.add(Map.of(
+            "type", "text",
+            "text", attachmentTextContent(attachment)
+        ));
+      }
+    }
+
+    return Map.of(
+        "role", "user",
+        "content", List.copyOf(parts),
+        "attachments", normalizedAttachments
+    );
+  }
+
+  private String attachmentTextContent(Map<String, Object> attachment) {
+    var name = stringValue(attachment.get("name"));
+    var mimeType = stringValue(attachment.get("mimeType"));
+    var size = intValue(attachment.get("size"));
+    var content = stringValue(attachment.get("content"));
+    return "Attached file: %s (%s, %d bytes)\n\n%s".formatted(
+        name.isBlank() ? "unnamed" : name,
+        mimeType.isBlank() ? "application/octet-stream" : mimeType,
+        Math.max(0, size),
+        content
+    );
+  }
+
+  private List<Map<String, Object>> normalizeAttachments(List<Map<String, Object>> attachments) {
+    if (attachments == null || attachments.isEmpty()) {
+      return List.of();
+    }
+    if (attachments.size() > MAX_ATTACHMENTS_PER_MESSAGE) {
+      throw new BadRequestException("A message can include at most " + MAX_ATTACHMENTS_PER_MESSAGE + " attachments.");
+    }
+    var totalBytes = 0;
+    var normalizedAttachments = new ArrayList<Map<String, Object>>();
+    for (var attachment : attachments) {
+      var normalized = new LinkedHashMap<String, Object>();
+      var mimeType = stringValue(attachment.get("mimeType")).toLowerCase();
+      var kind = stringValue(attachment.get("kind")).toLowerCase();
+      var size = Math.max(0, intValue(attachment.get("size")));
+      totalBytes += size;
+      if (totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
+        throw new BadRequestException("Attachment payload is too large.");
+      }
+      validateAttachmentPayload(kind, mimeType, size);
+      normalized.put("id", stringValue(attachment.get("id")).isBlank() ? id("att") : stringValue(attachment.get("id")));
+      normalized.put("name", stringValue(attachment.get("name")));
+      normalized.put("mimeType", stringValue(attachment.get("mimeType")));
+      normalized.put("size", size);
+      normalized.put("kind", kind.isBlank() ? inferredAttachmentKind(mimeType) : kind);
+      if (attachment.containsKey("content")) {
+        normalized.put("content", stringValue(attachment.get("content")));
+      }
+      if (attachment.containsKey("dataUrl")) {
+        normalized.put("dataUrl", stringValue(attachment.get("dataUrl")));
+      }
+      normalizedAttachments.add(Map.copyOf(normalized));
+    }
+    return List.copyOf(normalizedAttachments);
+  }
+
+  private void validateAttachmentPayload(String kind, String mimeType, int size) {
+    if (mimeType.startsWith("video/") || mimeType.startsWith("audio/") || "video".equals(kind) || "binary".equals(kind)) {
+      throw new BadRequestException("Video, audio, and binary attachments are not supported yet.");
+    }
+    if (mimeType.startsWith("image/") || "image".equals(kind)) {
+      if (size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        throw new BadRequestException("Image attachment exceeds 5 MB.");
+      }
+      return;
+    }
+    if (isTextAttachment(kind, mimeType)) {
+      if (size > MAX_TEXT_ATTACHMENT_BYTES) {
+        throw new BadRequestException("Text attachment exceeds 512 KB.");
+      }
+      return;
+    }
+    if (!mimeType.isBlank() && !mimeType.startsWith("text/") && !"application/json".equals(mimeType)) {
+      throw new BadRequestException("Unsupported attachment type: " + mimeType);
+    }
+  }
+
+  private boolean isTextAttachment(String kind, String mimeType) {
+    return "text".equals(kind)
+        || "file".equals(kind)
+        || mimeType.isBlank()
+        || mimeType.startsWith("text/")
+        || "application/json".equals(mimeType)
+        || "application/javascript".equals(mimeType)
+        || "application/typescript".equals(mimeType);
+  }
+
+  private String inferredAttachmentKind(String mimeType) {
+    if (mimeType.startsWith("image/")) {
+      return "image";
+    }
+    return "text";
+  }
+
+  private void drainNextQueuedInput(ChatSessionRecord session) {
+    if (session.queuedInputs().isEmpty() || isActiveRunStatus(session.runStatus())) {
+      return;
+    }
+    var queuedInputs = new ArrayList<>(session.queuedInputs());
+    var batch = List.copyOf(queuedInputs);
+    var base = session.withQueuedInputs(List.of(), Instant.now());
+    chatSessions.put(base.id(), base);
+    recordEventForSession(
+        base,
+        "chat.message.dequeued",
+        "Started queued user message batch.",
+        Map.of("queuedInputIds", batch.stream().map(item -> stringValue(item.get("id"))).toList(), "remainingQueueSize", 0)
+    );
+    startChatRun(base, batch, stringValue(batch.get(0).get("content")));
+  }
+
   public synchronized ChatSessionRecord handleChatCommand(String workspaceId, String command, Map<String, Object> arguments) {
-    var session = getChatSession(workspaceId);
+    var session = primaryChatSession(workspaceId).orElseThrow(() -> new NotFoundException("Chat session not found."));
+    return handleChatCommand(workspaceId, session.id(), command, arguments);
+  }
+
+  public synchronized ChatSessionRecord handleChatCommand(String workspaceId, String sessionId, String command, Map<String, Object> arguments) {
+    var session = getRawChatSession(workspaceId, sessionId);
     var normalized = normalizeSlashCommand(command);
     var args = arguments == null ? Map.<String, Object>of() : Map.copyOf(arguments);
+    if (!CHAT_COMMANDS.contains(normalized)) {
+      throw new BadRequestException("Unsupported chat command: /" + normalized);
+    }
+    recordEventForSession(
+        session,
+        "chat.command.received",
+        "Chat command received.",
+        Map.of("command", normalized, "arguments", args)
+    );
     return switch (normalized) {
       case "clear" -> clearChatContext(session);
-      case "model" -> setActiveModel(session, args);
       case "compact" -> requestContextCompact(session);
-      default -> throw new BadRequestException("Unsupported chat command: /" + normalized);
+      case "model" -> setActiveModel(session, args);
+      case "workspace" -> setCurrentWorkspace(session, args);
+      default -> sessionForResponse(session);
     };
   }
 
@@ -370,14 +759,40 @@ public class BrainxState {
     if (normalized.isBlank()) {
       throw new BadRequestException("Chat command is required.");
     }
-    return normalized;
+    return switch (normalized) {
+      case "workdir", "cwd", "目录", "工作目录", "切换工作目录" -> "workspace";
+      case "模型", "切换模型" -> "model";
+      case "清空", "清理", "清空上下文" -> "clear";
+      case "压缩", "上下文压缩" -> "compact";
+      default -> normalized;
+    };
+  }
+
+  private Map<String, Object> timelineNotice(String kind, String message, String detail, Instant now) {
+    var notice = new LinkedHashMap<String, Object>();
+    notice.put("id", id("notice"));
+    notice.put("kind", kind);
+    notice.put("message", message);
+    if (detail != null && !detail.isBlank()) {
+      notice.put("detail", detail);
+    }
+    notice.put("createdAt", now.toString());
+    return Map.copyOf(notice);
+  }
+
+  private List<Map<String, Object>> timelineNoticesWith(ChatSessionRecord session, String kind, String message, String detail, Instant now) {
+    var notices = new ArrayList<>(session.timelineNotices());
+    notices.add(timelineNotice(kind, message, detail, now));
+    return List.copyOf(notices);
   }
 
   private ChatSessionRecord clearChatContext(ChatSessionRecord session) {
     if (isActiveRunStatus(session.runStatus())) {
       throw new StateConflictException("Cannot clear context while a run is active.");
     }
-    var cleared = session.withMessages(List.of(), "completed", Instant.now());
+    var now = Instant.now();
+    var clearNotice = timelineNotice("context_cleared", "已清空上下文", "", now);
+    var cleared = session.withQueuedInputs(List.of(), now).withMessagesAndTimelineNotices(List.of(), List.of(clearNotice), "completed", now);
     chatSessions.put(cleared.id(), cleared);
     recordEventForSession(session, "context.cleared", "Chat context cleared.", Map.of());
     return sessionForResponse(cleared);
@@ -393,9 +808,34 @@ public class BrainxState {
     if (!exists) {
       throw new BadRequestException("Unknown model: " + modelName);
     }
+    var now = Instant.now();
     activeModelNamesByWorkspace.put(session.workspaceId(), modelName);
-    recordEventForSession(session, "model.preference.updated", "Active model changed.", Map.of("modelName", modelName));
-    return sessionForResponse(requireChatSession(session.id()));
+    var updated = session.withTimelineNotices(
+        timelineNoticesWith(session, "model_changed", "已切换模型：" + modelName, modelName, now),
+        now
+    );
+    chatSessions.put(updated.id(), updated);
+    recordEventForSession(updated, "model.preference.updated", "Active model changed.", Map.of("modelName", modelName));
+    return sessionForResponse(updated);
+  }
+
+  private ChatSessionRecord setCurrentWorkspace(ChatSessionRecord session, Map<String, Object> arguments) {
+    if (isActiveRunStatus(session.runStatus())) {
+      throw new StateConflictException("Cannot change workspace while a run is active.");
+    }
+    var path = stringValue(arguments.get("path")).trim();
+    if (path.isBlank()) {
+      throw new BadRequestException("/workspace requires arguments.path.");
+    }
+    var now = Instant.now();
+    var withWorkspace = session.withCurrentWorkspace(path, now);
+    var updated = withWorkspace.withTimelineNotices(
+        timelineNoticesWith(withWorkspace, "workspace_changed", "已切换工作目录：" + path, path, now),
+        now
+    );
+    chatSessions.put(updated.id(), updated);
+    recordEventForSession(updated, "workspace.changed", "Current workspace changed.", Map.of("currentWorkspace", path));
+    return sessionForResponse(updated);
   }
 
   private ChatSessionRecord requestContextCompact(ChatSessionRecord session) {
@@ -403,13 +843,23 @@ public class BrainxState {
       throw new StateConflictException("Cannot compact context while a run is active.");
     }
     if (session.messages().isEmpty()) {
-      return sessionForResponse(session);
+      var now = Instant.now();
+      var updated = session.withTimelineNotices(
+          timelineNoticesWith(session, "context_compact_skipped", "没有可压缩的上下文", "", now),
+          now
+      );
+      chatSessions.put(updated.id(), updated);
+      return sessionForResponse(updated);
     }
     var now = Instant.now();
     var run = new RunRecord(id("run"), session.workspaceId(), session.agentId(), session.branchId(), "/compact", "waiting_for_client", "Context compact requested.", now);
     runs.put(run.id(), run);
     chatSessionIdsByRun.put(run.id(), session.id());
-    var updated = session.withRun(run.id(), run.status(), now);
+    var withRun = session.withRun(run.id(), run.status(), now);
+    var updated = withRun.withTimelineNotices(
+        timelineNoticesWith(withRun, "context_compaction_requested", "正在压缩上下文", "", now),
+        now
+    );
     chatSessions.put(updated.id(), updated);
     var execution = ExecutionRequestRecord.modelInvoke(
         id("exec"),
@@ -421,7 +871,8 @@ public class BrainxState {
         0,
         compactModelMessages(session),
         List.of(),
-        activeModelName(session.workspaceId())
+        activeModelName(session.workspaceId()),
+        session.currentWorkspace()
     );
     executionRequests.put(execution.executionId(), execution);
     recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
@@ -482,6 +933,7 @@ public class BrainxState {
     return executionRequests.values().stream()
         .filter(request -> daemonCanAccessWorkspace(daemon, request.workspaceId()))
         .filter(request -> "pending".equals(request.status()))
+        .filter(request -> !runIsCancelled(request.runId()))
         .toList();
   }
 
@@ -507,6 +959,10 @@ public class BrainxState {
       throw new StateConflictException("Execution request does not belong to daemon workspace.");
     }
     if (!"pending".equals(request.status())) {
+      return;
+    }
+    if (runIsCancelled(request.runId())) {
+      executionRequests.put(request.executionId(), request.withStatus("cancelled"));
       return;
     }
     executionRequests.put(request.executionId(), request.completed());
@@ -541,6 +997,11 @@ public class BrainxState {
       return;
     }
 
+    if ("skill.apply".equals(request.toolName())) {
+      completeSkillApplyInvocation(request, result);
+      return;
+    }
+
     if (LOCAL_TOOLS.contains(request.toolName())) {
       recordEvent(
           request.runId(),
@@ -570,6 +1031,103 @@ public class BrainxState {
       throw new ForbiddenException("Client daemon belongs to a different user.");
     }
     completeExecution(daemonId, result);
+  }
+
+  public synchronized ExecutionEventRecord submitExecutionStreamEvent(
+      String daemonId,
+      String executionId,
+      String runId,
+      int streamSequence,
+      String streamType,
+      String contentDelta,
+      Map<String, Object> payload
+  ) {
+    var daemon = requireDaemon(daemonId);
+    if (!"active".equals(daemon.status())) {
+      throw new ForbiddenException("Client daemon is not active.");
+    }
+    var request = executionRequests.get(executionId);
+    if (request == null) {
+      throw new NotFoundException("Execution request not found.");
+    }
+    if (!request.runId().equals(runId)) {
+      throw new StateConflictException("Stream event run does not match execution request.");
+    }
+    if (!daemonCanAccessWorkspace(daemon, request.workspaceId())) {
+      throw new StateConflictException("Execution request does not belong to daemon workspace.");
+    }
+    if (runIsCancelled(runId)) {
+      return existingOrIgnoredStreamEvent(runId, executionId, streamSequence);
+    }
+    var key = executionId + ":" + streamSequence;
+    if (!streamEventKeys.add(key)) {
+      return existingStreamEvent(runId, executionId, streamSequence);
+    }
+    var eventPayload = new LinkedHashMap<String, Object>();
+    eventPayload.put("streamType", stringValue(streamType).isBlank() ? "assistant_delta" : streamType);
+    eventPayload.put("streamSequence", streamSequence);
+    eventPayload.put("contentDelta", stringValue(contentDelta));
+    if (payload != null && !payload.isEmpty()) {
+      eventPayload.putAll(payload);
+    }
+    return recordEvent(
+        runId,
+        "model.stream.delta",
+        stringValue(contentDelta).isBlank() ? "Model stream delta." : stringValue(contentDelta),
+        request.riskTier(),
+        executionId,
+        eventPayload
+    );
+  }
+
+  public synchronized List<ExecutionEventRecord> chatStreamEvents(String workspaceId, String runId, int afterSequence) {
+    var session = getChatSession(workspaceId);
+    var targetRunId = stringValue(runId).isBlank() ? session.runId() : runId;
+    if (targetRunId.isBlank()) {
+      return List.of();
+    }
+    var run = requireRun(targetRunId);
+    if (!workspaceId.equals(run.workspaceId())) {
+      throw new NotFoundException("Run does not belong to workspace.");
+    }
+    return executionEvents.getOrDefault(targetRunId, List.of()).stream()
+        .filter(event -> "model.stream.delta".equals(event.type()))
+        .filter(event -> event.sequence() > afterSequence)
+        .toList();
+  }
+
+  private ExecutionEventRecord existingStreamEvent(String runId, String executionId, int streamSequence) {
+    return executionEvents.getOrDefault(runId, List.of()).stream()
+        .filter(event -> executionId.equals(event.executionId()))
+        .filter(event -> streamSequence == (int) event.payload().getOrDefault("streamSequence", -1))
+        .findFirst()
+        .orElseThrow(() -> new StateConflictException("Duplicate stream event could not be replayed."));
+  }
+
+  private ExecutionEventRecord existingOrIgnoredStreamEvent(String runId, String executionId, int streamSequence) {
+    return executionEvents.getOrDefault(runId, List.of()).stream()
+        .filter(event -> executionId.equals(event.executionId()))
+        .filter(event -> streamSequence == (int) event.payload().getOrDefault("streamSequence", -1))
+        .findFirst()
+        .orElseGet(() -> new ExecutionEventRecord(
+            id("evt"),
+            runId,
+            "model.stream.ignored",
+            streamSequence,
+            Instant.now(),
+            "Ignored stream event for cancelled run.",
+            null,
+            "server",
+            "info",
+            executionId,
+            Map.of("streamSequence", streamSequence),
+            null
+        ));
+  }
+
+  private boolean runIsCancelled(String runId) {
+    var run = runs.get(runId);
+    return run != null && "cancelled".equals(run.status());
   }
 
   private void recordFailedExecutionEvent(ExecutionRequestRecord request, ExecutionResultRecord result) {
@@ -688,20 +1246,6 @@ public class BrainxState {
       throw new StateConflictException("ask_user request is no longer waiting for an answer.");
     }
     updateToolCallStatus(run.id(), toolCallId, "completed");
-    appendChatMessage(
-        run.id(),
-        toolResultMessage(
-            toolCallId,
-            "ask_user",
-            new ExecutionResultRecord(
-                id("ask"),
-                "completed",
-                "User answered.",
-                Map.of("answers", List.copyOf(answers == null ? List.of() : answers))
-            )
-        ),
-        "waiting_for_client"
-    );
     recordEvent(
         run.id(),
         "tool.user_input.answered",
@@ -710,7 +1254,22 @@ public class BrainxState {
         null,
         Map.of("toolName", "ask_user", "toolCallId", toolCallId)
     );
-    requestModelContinuation(run, "User answered.", toolsForConversation(requireChatSessionForRun(run.id())), "Requested model continuation after user answer.");
+    replaceToolResultMessage(
+        run.id(),
+        toolCallId,
+        "ask_user",
+        new ExecutionResultRecord(
+            id("ask"),
+            "completed",
+            "User answered.",
+            Map.of(
+                "answers", List.copyOf(answers == null ? List.of() : answers),
+                "status", "answered"
+            )
+        ),
+        "waiting_for_client"
+    );
+    requestAgentLoopContinuation(run, "User answered.", "Requested client-side agent loop after user answer.");
     return sessionForResponse(requireChatSessionForRun(run.id()));
   }
 
@@ -750,20 +1309,117 @@ public class BrainxState {
       List<String> evidence,
       double confidence
   ) {
+    return createSkillProposal(workspaceId, "", "", name, scope, "", markdownContent, "", evidence, confidence);
+  }
+
+  private synchronized SkillProposalRecord createSkillProposal(
+      String workspaceId,
+      String runId,
+      String daemonId,
+      String name,
+      String scope,
+      String path,
+      String markdownContent,
+      String reason,
+      List<String> evidence,
+      double confidence
+  ) {
     requireWorkspace(workspaceId);
     var proposal = new SkillProposalRecord(
         id("sp"),
         workspaceId,
+        stringValue(runId),
+        stringValue(daemonId),
         name,
-        scope,
+        normalizeSkillScope(scope),
+        stringValue(path),
         markdownContent,
+        stringValue(reason),
         List.copyOf(evidence),
         confidence,
         "review_requested",
         1,
-        Instant.now()
+        Instant.now(),
+        null
     );
     skillProposals.put(proposal.id(), proposal);
+    return proposal;
+  }
+
+  public synchronized List<SkillProposalRecord> skillProposals() {
+    return List.copyOf(skillProposals.values());
+  }
+
+  public synchronized Map<String, Object> skillInventory(String workspaceId) {
+    requireWorkspace(workspaceId);
+    var mergedProject = new ArrayList<Object>();
+    var mergedGlobal = new ArrayList<Object>();
+    for (var entry : skillInventoryByDaemon.entrySet()) {
+      var daemon = daemons.get(entry.getKey());
+      if (daemon == null || !daemonCanAccessWorkspace(daemon, workspaceId)) {
+        continue;
+      }
+      var inventory = entry.getValue();
+      mergedProject.addAll(listValue(inventory.get("project")));
+      mergedGlobal.addAll(listValue(inventory.get("global")));
+    }
+    return Map.of("project", mergedProject, "global", mergedGlobal);
+  }
+
+  public synchronized void syncClientSkills(String daemonId, Map<String, Object> inventory) {
+    var daemon = requireDaemon(daemonId);
+    if (!"active".equals(daemon.status())) {
+      throw new ForbiddenException("Client daemon is not active.");
+    }
+    skillInventoryByDaemon.put(daemonId, Map.copyOf(inventory == null ? Map.of() : inventory));
+  }
+
+  public synchronized SkillProposalRecord approveSkillProposal(String proposalId) {
+    var proposal = requireSkillProposal(proposalId);
+    if (!"review_requested".equals(proposal.status())) {
+      return proposal;
+    }
+    if (proposal.path().isBlank() || proposal.markdownContent().isBlank()) {
+      throw new BadRequestException("Skill proposal requires path and markdown content before approval.");
+    }
+    if (proposal.daemonId().isBlank()) {
+      firstDaemonForWorkspace(proposal.workspaceId());
+    }
+    var runId = proposal.runId().isBlank() ? ensureSkillReviewRun(proposal.workspaceId()) : proposal.runId();
+    var input = new LinkedHashMap<String, Object>();
+    input.put("path", proposal.path());
+    input.put("content", proposal.markdownContent());
+    input.put("createParents", true);
+    var request = ExecutionRequestRecord.toolInvoke(
+        id("exec"),
+        proposal.workspaceId(),
+        DEV_AGENT_ID,
+        DEV_BRANCH_ID,
+        runId,
+        "skill.apply",
+        input,
+        "write",
+        "pending"
+    );
+    executionRequests.put(request.executionId(), request);
+    skillProposalExecutionIds.put(request.executionId(), proposal.id());
+    var approved = proposal.withStatus("approved", Instant.now());
+    skillProposals.put(approved.id(), approved);
+    return approved;
+  }
+
+  public synchronized SkillProposalRecord rejectSkillProposal(String proposalId) {
+    var proposal = requireSkillProposal(proposalId);
+    var rejected = proposal.withStatus("rejected", Instant.now());
+    skillProposals.put(rejected.id(), rejected);
+    return rejected;
+  }
+
+  private SkillProposalRecord requireSkillProposal(String proposalId) {
+    var proposal = skillProposals.get(proposalId);
+    if (proposal == null) {
+      throw new NotFoundException("Skill proposal not found.");
+    }
     return proposal;
   }
 
@@ -949,12 +1605,20 @@ public class BrainxState {
   private void completeModelInvocation(ExecutionRequestRecord request, RunRecord run, ExecutionResultRecord result) {
     recordTokenUsage(run.workspaceId(), result);
     var phase = stringValue(request.input().get("phase"));
+    if (phase.isBlank() || "agent_loop".equals(phase)) {
+      completeAgentLoopModel(request, run, result);
+      return;
+    }
     if ("tool_selection".equals(phase)) {
       completeToolSelectionModel(request, run, result);
       return;
     }
     if ("compact".equals(phase)) {
       completeCompactModel(request, run, result);
+      return;
+    }
+    if ("session_title".equals(phase)) {
+      completeSessionTitleModel(request, run, result);
       return;
     }
     if ("final_response".equals(phase)) {
@@ -964,6 +1628,183 @@ public class BrainxState {
       return;
     }
     failRun(request, run, "Unsupported model.invoke phase: " + phase);
+  }
+
+  private void completeAgentLoopModel(ExecutionRequestRecord request, RunRecord run, ExecutionResultRecord result) {
+    var returnedMessages = asMapList(result.data().get("messages")).stream()
+        .filter(message -> !"system".equals(stringValue(message.get("role"))))
+        .toList();
+    collectSkillProposalsFromMessages(request, run, returnedMessages);
+    var nextStatus = Boolean.TRUE.equals(result.data().get("paused")) ? "waiting_for_user" : "completed";
+    ChatSessionRecord updatedSession;
+    if (!returnedMessages.isEmpty()) {
+      var session = requireChatSessionForRun(run.id());
+      updatedSession = session.withMessages(returnedMessages, nextStatus, Instant.now());
+      chatSessions.put(session.id(), updatedSession);
+    } else {
+      appendChatMessage(run.id(), assistantTextMessage(visibleModelContent(result)), nextStatus);
+      updatedSession = requireChatSessionForRun(run.id());
+    }
+    runs.put(run.id(), run.withStatus(nextStatus, result.summary()));
+    recordEvent(
+        run.id(),
+        "completed".equals(nextStatus) ? "agent.run.completed" : "agent.run.paused",
+        result.summary(),
+        null,
+        request.executionId(),
+        Map.of("phase", "agent_loop")
+    );
+    if ("completed".equals(nextStatus)) {
+      if (updatedSession.queuedInputs().isEmpty()) {
+        requestSessionTitleIfNeeded(updatedSession, run);
+      } else {
+        drainNextQueuedInput(updatedSession);
+      }
+    }
+  }
+
+  private void collectSkillProposalsFromMessages(
+      ExecutionRequestRecord request,
+      RunRecord run,
+      List<Map<String, Object>> returnedMessages
+  ) {
+    for (var message : returnedMessages) {
+      if (!"tool".equals(stringValue(message.get("role")))) {
+        continue;
+      }
+      var toolName = toolMessageName(message);
+      if (!"create_skill".equals(toolName) && !"renovation_skill".equals(toolName)) {
+        continue;
+      }
+      var payload = toolResultPayload(message);
+      var proposalType = stringValue(payload.get("proposalType"));
+      if (!"create_skill".equals(proposalType) && !"renovation_skill".equals(proposalType)) {
+        continue;
+      }
+      var content = stringValue(payload.get("content"));
+      var path = stringValue(payload.get("path"));
+      if (content.isBlank() || path.isBlank()) {
+        continue;
+      }
+      var daemonId = daemonIdForExecution(request);
+      createSkillProposal(
+          request.workspaceId(),
+          run.id(),
+          daemonId,
+          stringValue(payload.get("name")).isBlank() ? skillNameFromPath(path) : stringValue(payload.get("name")),
+          stringValue(payload.get("scope")),
+          path,
+          content,
+          stringValue(payload.get("reason")),
+          stringList(payload.get("evidence")),
+          0.8
+      );
+    }
+  }
+
+  private String daemonIdForExecution(ExecutionRequestRecord request) {
+    return daemons.values().stream()
+        .filter(daemon -> daemonCanAccessWorkspace(daemon, request.workspaceId()))
+        .map(ClientDaemonRecord::id)
+        .findFirst()
+        .orElse("");
+  }
+
+  private String skillNameFromPath(String path) {
+    var normalized = path.replace('\\', '/');
+    var index = normalized.lastIndexOf('/');
+    if (index <= 0) {
+      return "skill";
+    }
+    var parent = normalized.substring(0, index);
+    var parentIndex = parent.lastIndexOf('/');
+    return parentIndex >= 0 ? parent.substring(parentIndex + 1) : parent;
+  }
+
+  private void completeSessionTitleModel(ExecutionRequestRecord request, RunRecord run, ExecutionResultRecord result) {
+    var session = requireChatSessionForRun(run.id());
+    var title = sanitizeGeneratedTitle(visibleModelContent(result));
+    if (!title.isBlank() && stringValue(session.title()).isBlank()) {
+      var updated = session.withTitle(title, Instant.now());
+      chatSessions.put(updated.id(), updated);
+      recordEvent(
+          run.id(),
+          "chat.session.title.generated",
+          "Generated chat session title.",
+          null,
+          request.executionId(),
+          Map.of("title", title)
+      );
+    }
+  }
+
+  private void requestSessionTitleIfNeeded(ChatSessionRecord session, RunRecord run) {
+    if (!stringValue(session.title()).isBlank() || !hasFirstCompletedExchange(session) || hasTitleRequestForSession(session.id())) {
+      return;
+    }
+    var execution = ExecutionRequestRecord.modelInvoke(
+        id("exec"),
+        session.workspaceId(),
+        session.agentId(),
+        session.branchId(),
+        run.id(),
+        "session_title",
+        0,
+        sessionTitleMessages(session),
+        List.of(),
+        activeModelName(session.workspaceId()),
+        session.currentWorkspace()
+    );
+    executionRequests.put(execution.executionId(), execution);
+    recordEvent(
+        run.id(),
+        "chat.session.title.requested",
+        "Requested generated chat title.",
+        null,
+        execution.executionId(),
+        Map.of("phase", "session_title")
+    );
+  }
+
+  private boolean hasFirstCompletedExchange(ChatSessionRecord session) {
+    var sawUser = false;
+    for (var message : session.messages()) {
+      if ("user".equals(stringValue(message.get("role")))) {
+        sawUser = true;
+      }
+      if (sawUser && "assistant".equals(stringValue(message.get("role"))) && !stringValue(message.get("content")).isBlank()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean hasTitleRequestForSession(String sessionId) {
+    return executionRequests.values().stream()
+        .filter(request -> sessionId.equals(chatSessionIdsByRun.get(request.runId())))
+        .anyMatch(request -> "session_title".equals(stringValue(request.input().get("phase"))));
+  }
+
+  private List<Map<String, Object>> sessionTitleMessages(ChatSessionRecord session) {
+    return List.of(
+        Map.of(
+            "role", "system",
+            "content", "Generate a concise professional chat title. Return only the title, no quotes, no punctuation suffix, 3 to 8 words."
+        ),
+        Map.of("role", "user", "content", jsonString(recentMessages(session.messages(), 6)))
+    );
+  }
+
+  private String sanitizeGeneratedTitle(String title) {
+    var normalized = title == null ? "" : title.trim();
+    if ((normalized.startsWith("\"") && normalized.endsWith("\"")) || (normalized.startsWith("'") && normalized.endsWith("'"))) {
+      normalized = normalized.substring(1, normalized.length() - 1).trim();
+    }
+    normalized = normalized.replaceAll("[\\r\\n]+", " ").trim();
+    if (normalized.length() > 80) {
+      normalized = normalized.substring(0, 80).trim();
+    }
+    return normalized;
   }
 
   private void recordTokenUsage(String workspaceId, ExecutionResultRecord result) {
@@ -996,7 +1837,14 @@ public class BrainxState {
     ));
     var recent = recentMessages(session.messages(), 6);
     compacted.addAll(recent);
-    chatSessions.put(session.id(), session.withMessages(compacted, "completed", Instant.now()));
+    var now = Instant.now();
+    var compactedSession = session.withMessagesAndTimelineNotices(
+        compacted,
+        timelineNoticesWith(session, "context_compacted", "上下文已压缩", "", now),
+        "completed",
+        now
+    );
+    chatSessions.put(session.id(), compactedSession);
     runs.put(run.id(), run.withStatus("completed", "Context compacted."));
     recordEvent(
         run.id(),
@@ -1133,7 +1981,7 @@ public class BrainxState {
     var completedCallIds = new HashSet<String>();
     for (var message : session.messages()) {
       if ("tool".equals(stringValue(message.get("role")))) {
-        var callId = stringValue(message.get("tool_call_id"));
+        var callId = toolMessageCallId(message);
         if (!callId.isBlank()) {
           completedCallIds.add(callId);
         }
@@ -1146,11 +1994,10 @@ public class BrainxState {
         if (!completedCallIds.contains(callId)) {
           continue;
         }
-        var function = asMap(call.get("function"));
-        if (!toolName.equals(normalizeToolName(stringValue(function.get("name"))))) {
+        if (!toolName.equals(toolNameFromCall(call))) {
           continue;
         }
-        if (toolArguments(function.get("arguments")).equals(arguments)) {
+        if (toolArgumentsFromCall(call).equals(arguments)) {
           return true;
         }
       }
@@ -1356,6 +2203,35 @@ public class BrainxState {
     return List.of();
   }
 
+  private List<String> stringList(Object value) {
+    if (value instanceof List<?> list) {
+      return list.stream().map(this::stringValue).filter(item -> !item.isBlank()).toList();
+    }
+    return List.of();
+  }
+
+  private String normalizeSkillScope(String scope) {
+    var normalized = stringValue(scope).trim().toLowerCase();
+    return "global".equals(normalized) ? "global" : "project";
+  }
+
+  private String firstDaemonForWorkspace(String workspaceId) {
+    return daemons.values().stream()
+        .filter(daemon -> "active".equals(daemon.status()))
+        .filter(daemon -> daemonCanAccessWorkspace(daemon, workspaceId))
+        .map(ClientDaemonRecord::id)
+        .findFirst()
+        .orElseThrow(() -> new StateConflictException("No active client daemon is available for this workspace."));
+  }
+
+  private String ensureSkillReviewRun(String workspaceId) {
+    var workspace = requireWorkspace(workspaceId);
+    var run = new RunRecord(id("run"), workspaceId, DEV_AGENT_ID, DEV_BRANCH_ID, "skill.apply", "waiting_for_client", "Skill proposal approval.", Instant.now());
+    runs.put(run.id(), run);
+    recordEvent(run.id(), "agent.run.created", "Skill approval run created.", null, null, Map.of("workspaceName", workspace.name()));
+    return run.id();
+  }
+
   private void completeToolInvocation(ExecutionRequestRecord request, RunRecord run, ExecutionResultRecord result) {
     var callId = stringValue(request.input().get("toolCallId"));
     appendChatMessage(run.id(), toolResultMessage(callId, request.toolName(), result), "waiting_for_client");
@@ -1375,6 +2251,26 @@ public class BrainxState {
     }
 
     requestModelContinuation(run, result.summary(), toolsForConversation(requireChatSessionForRun(run.id())), "Requested model continuation.");
+  }
+
+  private void completeSkillApplyInvocation(ExecutionRequestRecord request, ExecutionResultRecord result) {
+    var run = requireRun(request.runId());
+    runs.put(run.id(), run.withStatus("completed".equals(result.status()) ? "completed" : "failed", result.summary()));
+    var proposalId = skillProposalExecutionIds.get(request.executionId());
+    if (proposalId != null && skillProposals.containsKey(proposalId)) {
+      var proposal = skillProposals.get(proposalId);
+      var status = "completed".equals(result.status()) ? "published" : "apply_failed";
+      skillProposals.put(proposalId, proposal.withStatus(status, Instant.now()));
+    }
+    recordEvent(
+        request.runId(),
+        "completed".equals(result.status()) ? "skill.apply.completed" : "skill.apply.failed",
+        "completed".equals(result.status()) ? "Skill proposal applied." : toolFailureSummary(result),
+        request.riskTier(),
+        request.executionId(),
+        executionResultEventPayload(request, result),
+        "completed".equals(result.status()) ? null : Map.of("code", "skill_apply_failed", "message", toolFailureSummary(result))
+    );
   }
 
   private boolean hasUnfinishedToolRequests(String runId, String batchId) {
@@ -1402,7 +2298,8 @@ public class BrainxState {
         loopIndex,
         toolSelectionMessages(session, tools),
         tools,
-        activeModelName(run.workspaceId())
+        activeModelName(run.workspaceId()),
+        session.currentWorkspace()
     );
     executionRequests.put(finalModelRequest.executionId(), finalModelRequest);
     recordStep(run.id(), "execution_request", "waiting_for_client", finalModelRequest.executionId());
@@ -1417,12 +2314,130 @@ public class BrainxState {
     runs.put(run.id(), run.withStatus("waiting_for_client", summary));
   }
 
-  private void failRun(ExecutionRequestRecord request, RunRecord run, String summary) {
-    runs.put(run.id(), run.withStatus("failed", summary));
-    if (chatSessionIdsByRun.containsKey(run.id())) {
-      appendChatMessage(run.id(), assistantTextMessage(summary), "failed");
+  private void requestAgentLoopContinuation(RunRecord run, String summary, String eventMessage) {
+    var session = requireChatSessionForRun(run.id());
+    var loopIndex = toolIterationCount(session);
+    var execution = ExecutionRequestRecord.modelInvoke(
+        id("exec"),
+        run.workspaceId(),
+        run.agentId(),
+        run.branchId(),
+        run.id(),
+        "agent_loop",
+        loopIndex,
+        agentLoopMessages(session),
+        List.of(),
+        activeModelName(run.workspaceId()),
+        session.currentWorkspace()
+    );
+    executionRequests.put(execution.executionId(), execution);
+    recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
+    recordEvent(
+        run.id(),
+        "execution.requested",
+        eventMessage,
+        execution.riskTier(),
+        execution.executionId(),
+        Map.of("toolName", execution.toolName(), "phase", "agent_loop")
+    );
+    runs.put(run.id(), run.withStatus("waiting_for_client", summary));
+    updateChatSessionRunStatus(run.id(), "waiting_for_client");
+  }
+
+  private void replaceToolResultMessage(
+      String runId,
+      String callId,
+      String toolName,
+      ExecutionResultRecord result,
+      String runStatus
+  ) {
+    var session = requireChatSessionForRun(runId);
+    var messages = new ArrayList<>(session.messages());
+    var replacement = toolResultMessage(callId, toolName, result);
+    var replaced = false;
+    for (var index = 0; index < messages.size(); index++) {
+      var message = messages.get(index);
+      if ("tool".equals(stringValue(message.get("role")))
+          && callId.equals(toolMessageCallId(message))
+          && toolName.equals(toolMessageName(message))) {
+        messages.set(index, replacement);
+        replaced = true;
+        break;
+      }
     }
-    recordEvent(run.id(), "agent.run.failed", summary, request.riskTier());
+    if (!replaced) {
+      messages.add(replacement);
+    }
+    chatSessions.put(session.id(), session.withMessages(messages, runStatus, Instant.now()));
+  }
+
+  private void failRun(ExecutionRequestRecord request, RunRecord run, String summary) {
+    var visibleSummary = sanitizeRuntimeError(summary);
+    runs.put(run.id(), run.withStatus("failed", visibleSummary));
+    if (chatSessionIdsByRun.containsKey(run.id())) {
+      var session = requireChatSessionForRun(run.id());
+      if (isUserFacingModelFailure(request)) {
+        var updated = markTrailingUserMessagesFailed(session, visibleSummary);
+        chatSessions.put(updated.id(), updated);
+        drainNextQueuedInput(updated);
+      } else {
+        appendChatMessage(run.id(), assistantTextMessage(visibleSummary), "failed");
+        drainNextQueuedInput(requireChatSessionForRun(run.id()));
+      }
+    }
+    recordEvent(run.id(), "agent.run.failed", visibleSummary, request.riskTier());
+  }
+
+  private boolean isUserFacingModelFailure(ExecutionRequestRecord request) {
+    if (!"model.invoke".equals(request.toolName())) {
+      return false;
+    }
+    var phase = stringValue(request.input().get("phase"));
+    return phase.isBlank()
+        || "agent_loop".equals(phase)
+        || "tool_selection".equals(phase)
+        || "final_response".equals(phase);
+  }
+
+  private ChatSessionRecord markTrailingUserMessagesFailed(ChatSessionRecord session, String message) {
+    var messages = new ArrayList<>(session.messages());
+    var changed = false;
+    for (var index = messages.size() - 1; index >= 0; index--) {
+      var candidate = messages.get(index);
+      if (!"user".equals(stringValue(candidate.get("role")))) {
+        break;
+      }
+      var updated = new LinkedHashMap<>(candidate);
+      updated.put("status", "failed");
+      updated.put("error", Map.of(
+          "code", "model_provider_error",
+          "message", message
+      ));
+      messages.set(index, Map.copyOf(updated));
+      changed = true;
+    }
+    if (!changed) {
+      return session.withMessages(session.messages(), "failed", Instant.now());
+    }
+    return session.withMessages(messages, "failed", Instant.now());
+  }
+
+  private String sanitizeRuntimeError(String message) {
+    var cleaned = stringValue(message)
+        .replaceFirst("(?i)^model\\.invoke failed:\\s*", "")
+        .replaceFirst("(?i)^model provider returned\\s*", "")
+        .trim();
+    var matcher = Pattern.compile("(?i)HTTP\\s+(\\d{3})\\s*:\\s*(\\{.*\\})").matcher(cleaned);
+    if (matcher.find()) {
+      try {
+        var payload = JSON.readValue(matcher.group(2), new TypeReference<Map<String, Object>>() {});
+        var title = stringValue(payload.get("title"));
+        return "HTTP " + matcher.group(1) + (title.isBlank() ? "" : ": " + title);
+      } catch (JsonProcessingException ignored) {
+        return "HTTP " + matcher.group(1);
+      }
+    }
+    return cleaned.isBlank() ? stringValue(message) : cleaned;
   }
 
   private void appendChatMessage(String runId, Map<String, Object> message, String runStatus) {
@@ -1442,16 +2457,15 @@ public class BrainxState {
     var found = false;
     for (var message : session.messages()) {
       if ("tool".equals(stringValue(message.get("role")))
-          && toolCallId.equals(stringValue(message.get("tool_call_id")))
-          && toolName.equals(stringValue(message.get("name")))) {
+          && toolCallId.equals(toolMessageCallId(message))
+          && toolName.equals(toolMessageName(message))) {
+        if ("waiting_for_user".equals(stringValue(toolResultPayload(message).get("status")))) {
+          return "waiting_for_user";
+        }
         return "completed";
       }
       for (var call : toolCallsFromMessage(message)) {
-        var function = asMap(call.get("function"));
-        if (toolCallId.equals(stringValue(call.get("id"))) && toolName.equals(stringValue(call.get("kind")))) {
-          found = true;
-        }
-        if (toolCallId.equals(stringValue(call.get("id"))) && toolName.equals(stringValue(function.get("name")))) {
+        if (toolCallId.equals(stringValue(call.get("id"))) && toolName.equals(toolNameFromCall(call))) {
           found = true;
         }
       }
@@ -1467,6 +2481,18 @@ public class BrainxState {
     // Standard OpenAI messages do not carry UI status. Status is exposed through toolStates.
   }
 
+  private String toolMessageCallId(Map<String, Object> message) {
+    var callId = stringValue(message.get("tool_call_id"));
+    if (callId.isBlank()) {
+      callId = stringValue(message.get("toolCallId"));
+    }
+    return callId;
+  }
+
+  private String toolMessageName(Map<String, Object> message) {
+    return normalizeToolName(stringValue(message.get("name")));
+  }
+
   private void expireTimedOutAskUser(Instant now) {
     var waitingRuns = runs.values().stream()
         .filter(run -> "waiting_for_user".equals(run.status()))
@@ -1479,17 +2505,15 @@ public class BrainxState {
       for (var call : expiredCalls) {
         var callId = stringValue(call.get("id"));
         updateToolCallStatus(run.id(), callId, "completed");
-        appendChatMessage(
+        replaceToolResultMessage(
             run.id(),
-            toolResultMessage(
-                callId,
-                "ask_user",
-                new ExecutionResultRecord(
-                    id("ask"),
-                    "completed",
-                    "User did not answer before timeout.",
-                    unansweredAskUserResult(call)
-                )
+            callId,
+            "ask_user",
+            new ExecutionResultRecord(
+                id("ask"),
+                "completed",
+                "User did not answer before timeout.",
+                unansweredAskUserResult(call)
             ),
             "waiting_for_client"
         );
@@ -1502,11 +2526,10 @@ public class BrainxState {
             Map.of("toolName", "ask_user", "toolCallId", callId, "reason", "timeout")
         );
       }
-      requestModelContinuation(
+      requestAgentLoopContinuation(
           requireRun(run.id()),
           "User did not answer before timeout.",
-          toolsForConversation(requireChatSessionForRun(run.id())),
-          "Requested model continuation after ask_user timeout."
+          "Requested client-side agent loop after ask_user timeout."
       );
     }
   }
@@ -1516,8 +2539,7 @@ public class BrainxState {
     var expired = new ArrayList<Map<String, Object>>();
     for (var message : session.messages()) {
       for (var call : toolCallsFromMessage(message)) {
-        var function = asMap(call.get("function"));
-        if (!"ask_user".equals(stringValue(function.get("name")))) {
+        if (!"ask_user".equals(toolNameFromCall(call))) {
           continue;
         }
         var callId = stringValue(call.get("id"));
@@ -1527,7 +2549,7 @@ public class BrainxState {
         if (askUserExpired(callId, now)) {
           expired.add(Map.of(
               "id", callId,
-              "arguments", toolArguments(function.get("arguments"))
+              "arguments", toolArgumentsFromCall(call)
           ));
         }
       }
@@ -1584,6 +2606,74 @@ public class BrainxState {
     return session;
   }
 
+  private ChatSessionRecord getRawChatSession(String workspaceId, String sessionId) {
+    requireWorkspace(workspaceId);
+    var session = requireChatSession(sessionId);
+    if (!workspaceId.equals(session.workspaceId())) {
+      throw new NotFoundException("Chat session not found.");
+    }
+    return session;
+  }
+
+  private Optional<ChatSessionRecord> primaryChatSession(String workspaceId) {
+    requireWorkspace(workspaceId);
+    var devSession = chatSessions.get(DEV_CHAT_SESSION_ID);
+    if (devSession != null && workspaceId.equals(devSession.workspaceId())) {
+      return Optional.of(devSession);
+    }
+    return chatSessions.values().stream()
+        .filter(session -> session.workspaceId().equals(workspaceId))
+        .findFirst();
+  }
+
+  private String normalizedSessionTitle(String title) {
+    var normalized = title == null ? "" : title.trim();
+    return normalized.isBlank() ? null : normalized;
+  }
+
+  private Set<String> descendantSessionIds(String sessionId) {
+    var ids = new HashSet<String>();
+    ids.add(sessionId);
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (var session : chatSessions.values()) {
+        if (ids.contains(session.id())) {
+          continue;
+        }
+        if (ids.contains(stringValue(session.parentSessionId()))) {
+          ids.add(session.id());
+          changed = true;
+        }
+      }
+    }
+    return Set.copyOf(ids);
+  }
+
+  private ChatSessionRecord cancelSessionInternal(ChatSessionRecord session, String summary, boolean recordSessionEvent) {
+    var now = Instant.now();
+    for (var entry : new ArrayList<>(executionRequests.entrySet())) {
+      var request = entry.getValue();
+      if (session.id().equals(chatSessionIdsByRun.get(request.runId()))
+          && ("pending".equals(request.status()) || "waiting_for_approval".equals(request.status()))) {
+        executionRequests.put(request.executionId(), request.withStatus("cancelled"));
+      }
+    }
+    if (session.runId() != null && !session.runId().isBlank() && runs.containsKey(session.runId())) {
+      var run = requireRun(session.runId());
+      if (!"cancelled".equals(run.status())) {
+        runs.put(run.id(), run.withStatus("cancelled", summary));
+        recordEvent(run.id(), "agent.run.cancelled", summary, null);
+      }
+    }
+    var updated = session.withQueuedInputs(List.of(), now).withMessages(session.messages(), "cancelled", now);
+    chatSessions.put(updated.id(), updated);
+    if (recordSessionEvent) {
+      recordEventForSession(updated, "chat.session.cancelled", summary, Map.of());
+    }
+    return updated;
+  }
+
   private void recordEventForSession(ChatSessionRecord session, String type, String message, Map<String, Object> payload) {
     if (session.runId() == null || session.runId().isBlank()) {
       return;
@@ -1638,12 +2728,20 @@ public class BrainxState {
   }
 
   private List<Map<String, Object>> defaultAvailableModels() {
-    return List.of(Map.of(
-        "name", DEFAULT_MODEL_NAME,
-        "model", "stepfun-ai/step-3.7-flash",
-        "protocol", "openai",
-        "contextWindow", DEFAULT_CONTEXT_WINDOW
-    ));
+    return List.of(
+        Map.of(
+            "name", DEFAULT_MODEL_NAME,
+            "model", "stepfun-ai/step-3.7-flash",
+            "protocol", "openai",
+            "contextWindow", DEFAULT_CONTEXT_WINDOW
+        ),
+        Map.of(
+            "name", "gpt-5.5",
+            "model", "gpt-5.5",
+            "protocol", "openai",
+            "contextWindow", DEFAULT_CONTEXT_WINDOW
+        )
+    );
   }
 
   private String activeModelName(String workspaceId) {
@@ -1656,14 +2754,20 @@ public class BrainxState {
     var resultStatuses = new LinkedHashMap<String, String>();
     for (var message : session.messages()) {
       if ("tool".equals(stringValue(message.get("role")))) {
-        var callId = stringValue(message.get("tool_call_id"));
+        var callId = toolMessageCallId(message);
         if (!callId.isBlank()) {
           finishedCallIds.add(callId);
-          var resultStatus = jsonObjectValue(message.get("content")).containsKey("error") ? "failed" : "completed";
+          var content = toolResultPayload(message);
+          var resultStatus = "waiting_for_user".equals(stringValue(content.get("status")))
+              ? "waiting"
+              : toolResultFailed(content) ? "failed" : "completed";
           resultStatuses.put(callId, resultStatus);
           var state = new LinkedHashMap<String, Object>();
           state.put("status", resultStatus);
-          state.put("riskTier", riskTierForTool(stringValue(message.get("name"))));
+          state.put("riskTier", riskTierForTool(toolMessageName(message)));
+          if ("ask_user".equals(toolMessageName(message)) && "waiting".equals(resultStatus)) {
+            state.put("expiresAt", askUserExpiresAt(session).toString());
+          }
           states.put(callId, Map.copyOf(state));
         }
       }
@@ -1675,8 +2779,7 @@ public class BrainxState {
         if (callId.isBlank()) {
           continue;
         }
-        var function = asMap(call.get("function"));
-        var toolName = normalizeToolName(stringValue(function.get("name")));
+        var toolName = toolNameFromCall(call);
         var state = new LinkedHashMap<String, Object>(states.getOrDefault(callId, Map.of()));
         state.putIfAbsent("status", finishedCallIds.contains(callId) ? resultStatuses.getOrDefault(callId, "completed") : defaultPendingStatus(session, toolName));
         state.putIfAbsent("riskTier", riskTierForTool(toolName));
@@ -1702,6 +2805,19 @@ public class BrainxState {
       states.put(callId, Map.copyOf(state));
     }
     return Map.copyOf(states);
+  }
+
+  private Map<String, Object> toolResultPayload(Map<String, Object> message) {
+    var content = jsonObjectValue(message.get("content"));
+    var nestedResult = asMap(content.get("result"));
+    return nestedResult.isEmpty() ? content : nestedResult;
+  }
+
+  private boolean toolResultFailed(Map<String, Object> content) {
+    if (content.containsKey("error")) {
+      return true;
+    }
+    return Boolean.FALSE.equals(content.get("ok"));
   }
 
   private String defaultPendingStatus(ChatSessionRecord session, String toolName) {
@@ -1857,8 +2973,24 @@ public class BrainxState {
         "role", "system",
         "content", systemPrompt(tools)
     ));
-    messages.addAll(session.messages());
+    messages.addAll(conversationMessages(session));
     return messages;
+  }
+
+  private List<Map<String, Object>> agentLoopMessages(ChatSessionRecord session) {
+    var messages = new ArrayList<Map<String, Object>>();
+    messages.add(Map.of(
+        "role", "system",
+        "content", AGENT_LOOP_SYSTEM_PROMPT
+    ));
+    messages.addAll(conversationMessages(session));
+    return messages;
+  }
+
+  private List<Map<String, Object>> conversationMessages(ChatSessionRecord session) {
+    return session.messages().stream()
+        .filter(message -> !("user".equals(stringValue(message.get("role"))) && "failed".equals(stringValue(message.get("status")))))
+        .toList();
   }
 
   private List<Map<String, Object>> finalModelMessages(ChatSessionRecord session, ExecutionRequestRecord toolRequest, ExecutionResultRecord toolResult) {
@@ -2025,21 +3157,7 @@ public class BrainxState {
 
   private String systemPrompt(List<Map<String, Object>> tools) {
     var names = toolNames(tools);
-    return """
-        You are brainx, a local agent runtime for project work.
-        Only call a tool when the user's request requires a real capability exposed in this request.
-        Available tools for this turn: %s.
-        Do not invent tool names. If a capability is not available, say that the current version cannot perform it and do not claim it was executed.
-        Use get_env for runtime and workspace environment facts.
-        Use read_files only when exact file content is needed.
-        Use search_workspace when paths or matching code locations are unknown.
-        For apply_patch, first know the target file content, then provide a git apply compatible patch with diff --git headers and correct @@ hunk ranges. Do not send informal patch snippets.
-        Use run_command only for short one-shot commands. Do not use it for long-running servers, watchers, or interactive sessions.
-        web_search currently returns mock local results only; do not claim it performed real network browsing.
-        Never request get_environment, list_files, read_file, read_many_files, create_subagent, branch_action, skill_action, check_policy, or request_approval.
-        For ordinary conversation, identity questions, or capability questions, answer directly without tool calls.
-        Keep replies concise and factual.
-        """.formatted(names.isEmpty() ? "none" : String.join(", ", names));
+    return AGENT_LOOP_SYSTEM_PROMPT + "\nAvailable tools for this turn: " + (names.isEmpty() ? "none" : String.join(", ", names)) + ".";
   }
 
   private String normalizeToolName(String toolName) {
@@ -2102,20 +3220,33 @@ public class BrainxState {
   }
 
   private NormalizedToolCall normalizeToolCall(Map<String, Object> toolCall) {
-    var function = asMap(toolCall.get("function"));
-    var toolName = normalizeToolName(stringValue(toolCall.get("name")));
-    if (toolName.isBlank()) {
-      toolName = normalizeToolName(stringValue(function.get("name")));
-    }
+    var toolName = toolNameFromCall(toolCall);
     var callId = stringValue(toolCall.get("id"));
     if (callId.isBlank()) {
       callId = id("call");
     }
+    return new NormalizedToolCall(callId, toolName, ZERO_ARGUMENT_TOOLS.contains(toolName) ? Map.of() : toolArgumentsFromCall(toolCall));
+  }
+
+  private String toolNameFromCall(Map<String, Object> toolCall) {
+    var function = asMap(toolCall.get("function"));
+    var toolName = normalizeToolName(stringValue(toolCall.get("name")));
+    if (toolName.isBlank()) {
+      toolName = normalizeToolName(stringValue(toolCall.get("kind")));
+    }
+    if (toolName.isBlank()) {
+      toolName = normalizeToolName(stringValue(function.get("name")));
+    }
+    return toolName;
+  }
+
+  private Map<String, Object> toolArgumentsFromCall(Map<String, Object> toolCall) {
+    var function = asMap(toolCall.get("function"));
     var arguments = toolCall.get("arguments");
     if (arguments == null) {
       arguments = function.get("arguments");
     }
-    return new NormalizedToolCall(callId, toolName, ZERO_ARGUMENT_TOOLS.contains(toolName) ? Map.of() : toolArguments(arguments));
+    return toolArguments(arguments);
   }
 
   private String modelMessageContent(ExecutionResultRecord result) {
@@ -2322,8 +3453,12 @@ public class BrainxState {
     chatSessions.put(chatId, new ChatSessionRecord(
         chatId,
         "Main Agent",
+        null,
+        chatId,
+        null,
         workspaceId,
         workspaceName,
+        DEFAULT_CURRENT_WORKSPACE,
         agent.id(),
         "brainx",
         resolvedBranch.id(),
@@ -2339,6 +3474,9 @@ public class BrainxState {
         Map.of(),
         defaultAvailableModels(),
         DEFAULT_MODEL_NAME,
+        List.of(),
+        List.of(),
+        now,
         now,
         List.of()
     ));
@@ -2354,8 +3492,12 @@ public class BrainxState {
     chatSessions.put(DEV_CHAT_SESSION_ID, new ChatSessionRecord(
         DEV_CHAT_SESSION_ID,
         "Main Agent",
+        null,
+        DEV_CHAT_SESSION_ID,
+        null,
         DEV_WORKSPACE_ID,
         "Brainx Local",
+        DEFAULT_CURRENT_WORKSPACE,
         DEV_AGENT_ID,
         "brainx",
         DEV_BRANCH_ID,
@@ -2371,6 +3513,9 @@ public class BrainxState {
         Map.of(),
         defaultAvailableModels(),
         DEFAULT_MODEL_NAME,
+        List.of(),
+        List.of(),
+        now,
         now,
         List.of()
     ));

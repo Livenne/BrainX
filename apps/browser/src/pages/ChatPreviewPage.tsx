@@ -839,20 +839,12 @@ function PatchDetail({ tool }: { tool: ToolSample }) {
 }
 
 function WriteFileDetail({ tool }: { tool: ToolSample }) {
+  const path = String(tool.result.data.path ?? tool.arguments.path ?? tool.target);
   const content = firstString(tool.arguments.content)?.split('\n') ?? [];
+  const diff = ['--- /dev/null', `+++ b/${path}`, '@@', ...content.map((line) => `+${line}`)];
   return (
     <div className="tool-detail-stack">
-      <div className="file-preview">
-        <div className="file-preview-head">
-          <FileText aria-hidden="true" size={15} />
-          <span>{String(tool.result.data.path ?? tool.arguments.path ?? tool.target)}</span>
-        </div>
-        <pre className="preview-code-lines">
-          {content.map((line) => (
-            <code key={line}>{line}</code>
-          ))}
-        </pre>
-      </div>
+      <DiffLines lines={diff} label="File diff" />
     </div>
   );
 }
@@ -1002,17 +994,25 @@ function AgentLoopTimeline({ scenario }: { scenario: ScenarioKind }) {
   );
 }
 
-function DiffLines({ lines }: { lines: unknown }) {
+function DiffLines({ lines, label = 'Patch diff' }: { lines: unknown; label?: string }) {
   const diffLines = Array.isArray(lines) ? lines.map(String) : [];
   return (
-    <pre className="preview-code-lines diff-lines" aria-label="Patch diff">
+    <pre className="preview-code-lines diff-lines" aria-label={label}>
       {diffLines.map((line) => (
-        <code data-line-kind={line.startsWith('+') ? 'add' : line.startsWith('-') ? 'remove' : 'meta'} key={line}>
+        <code data-line-kind={previewDiffLineKind(line)} key={line}>
           {line}
         </code>
       ))}
     </pre>
   );
+}
+
+function previewDiffLineKind(line: string) {
+  if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('***')) return 'meta';
+  if (line.startsWith('@@')) return 'hunk';
+  if (line.startsWith('+')) return 'add';
+  if (line.startsWith('-')) return 'remove';
+  return 'context';
 }
 
 function ReviewControls({

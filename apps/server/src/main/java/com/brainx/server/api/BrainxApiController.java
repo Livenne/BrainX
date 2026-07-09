@@ -18,20 +18,26 @@ import com.brainx.server.core.RunRecord;
 import com.brainx.server.core.SkillProposalRecord;
 import com.brainx.server.core.UserView;
 import com.brainx.server.core.WorkspaceRecord;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -42,9 +48,11 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1")
 public class BrainxApiController {
   private final BrainxState state;
+  private final ObjectMapper mapper;
 
-  public BrainxApiController(BrainxState state) {
+  public BrainxApiController(BrainxState state, ObjectMapper mapper) {
     this.state = state;
+    this.mapper = mapper;
   }
 
   @PostMapping("/auth/register")
@@ -99,12 +107,42 @@ public class BrainxApiController {
     return state.getChatSession(workspaceId);
   }
 
+  @GetMapping("/workspaces/{workspaceId}/chat/sessions")
+  List<ChatSessionRecord> chatSessions(@PathVariable String workspaceId) {
+    return state.chatSessions(workspaceId);
+  }
+
+  @GetMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}")
+  ChatSessionRecord getChatSession(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId
+  ) {
+    return state.getChatSession(workspaceId, sessionId);
+  }
+
+  @PostMapping("/workspaces/{workspaceId}/chat/sessions")
+  ChatSessionRecord createChatSession(
+      @PathVariable String workspaceId,
+      @RequestBody(required = false) CreateChatSessionRequest request
+  ) {
+    return state.createChatSession(workspaceId, request == null ? null : request.title());
+  }
+
   @PostMapping("/workspaces/{workspaceId}/chat/messages")
   ChatSessionRecord sendChatMessage(
       @PathVariable String workspaceId,
       @Valid @RequestBody SendChatMessageRequest request
   ) {
-    return state.sendChatMessage(workspaceId, request.content());
+    return state.sendChatMessage(workspaceId, request.content(), request.attachments());
+  }
+
+  @PostMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}/messages")
+  ChatSessionRecord sendSessionChatMessage(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId,
+      @Valid @RequestBody SendChatMessageRequest request
+  ) {
+    return state.sendChatMessage(workspaceId, sessionId, request.content(), request.attachments());
   }
 
   @PostMapping("/workspaces/{workspaceId}/chat/commands")
@@ -113,6 +151,50 @@ public class BrainxApiController {
       @Valid @RequestBody ChatCommandRequest request
   ) {
     return state.handleChatCommand(workspaceId, request.command(), request.arguments());
+  }
+
+  @PostMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}/commands")
+  ChatSessionRecord handleSessionChatCommand(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId,
+      @Valid @RequestBody ChatCommandRequest request
+  ) {
+    return state.handleChatCommand(workspaceId, sessionId, request.command(), request.arguments());
+  }
+
+  @PostMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}/cancel")
+  ChatSessionRecord cancelChatSession(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId
+  ) {
+    return state.cancelChatSession(workspaceId, sessionId);
+  }
+
+  @PatchMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}")
+  ChatSessionRecord updateChatSession(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId,
+      @RequestBody UpdateChatSessionRequest request
+  ) {
+    return state.renameChatSession(workspaceId, sessionId, request == null ? null : request.title());
+  }
+
+  @PostMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}/fork")
+  ChatSessionRecord forkChatSession(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId
+  ) {
+    return state.forkChatSession(workspaceId, sessionId);
+  }
+
+  @DeleteMapping("/workspaces/{workspaceId}/chat/sessions/{sessionId}")
+  ResponseEntity<Map<String, Boolean>> deleteChatSession(
+      @PathVariable String workspaceId,
+      @PathVariable String sessionId,
+      @RequestParam(defaultValue = "false") boolean confirm
+  ) {
+    state.deleteChatSession(workspaceId, sessionId, confirm);
+    return ResponseEntity.accepted().body(Map.of("accepted", true));
   }
 
   @GetMapping("/agents/{agentId}/runs/{runId}")
@@ -144,6 +226,11 @@ public class BrainxApiController {
     );
   }
 
+  @PostMapping("/client-daemons/{daemonId}/bind-code")
+  BindCodeResponse createBindCodeForDaemon(@PathVariable String daemonId) {
+    return state.createBindCodeForDaemon(daemonId);
+  }
+
   @PostMapping("/client-daemons/complete-bind")
   ClientDaemonRecord completeBind(
       @RequestHeader("Authorization") String authorization,
@@ -159,11 +246,15 @@ public class BrainxApiController {
 
   @PostMapping("/client-daemons/{daemonId}/unbind")
   ResponseEntity<Map<String, Boolean>> unbindDaemon(
-      @RequestHeader("Authorization") String authorization,
+      @RequestHeader(value = "Authorization", required = false) String authorization,
       @PathVariable String daemonId,
       @Valid @RequestBody UnbindDaemonRequest request
   ) {
-    state.unbindDaemon(bearerToken(authorization), daemonId, request.confirm());
+    if (authorization != null && !authorization.isBlank()) {
+      state.unbindDaemon(bearerToken(authorization), daemonId, request.confirm());
+    } else {
+      state.unbindDaemon(daemonId, request.confirm());
+    }
     return ResponseEntity.accepted().body(Map.of("accepted", true));
   }
 
@@ -185,6 +276,15 @@ public class BrainxApiController {
             ))
             .toList()
     );
+    return ResponseEntity.accepted().body(Map.of("accepted", true));
+  }
+
+  @PutMapping("/client-daemons/{daemonId}/skills")
+  ResponseEntity<Map<String, Boolean>> syncClientSkills(
+      @PathVariable String daemonId,
+      @RequestBody Map<String, Object> inventory
+  ) {
+    state.syncClientSkills(daemonId, inventory == null ? Map.of() : inventory);
     return ResponseEntity.accepted().body(Map.of("accepted", true));
   }
 
@@ -211,6 +311,41 @@ public class BrainxApiController {
       state.completeExecution(daemonId, request.toRecord());
     }
     return ResponseEntity.accepted().body(Map.of("accepted", true));
+  }
+
+  @PostMapping("/client-daemons/{daemonId}/execution-stream-events")
+  ResponseEntity<Map<String, Boolean>> submitExecutionStreamEvent(
+      @PathVariable String daemonId,
+      @Valid @RequestBody SubmitExecutionStreamEventRequest request
+  ) {
+    state.submitExecutionStreamEvent(
+        daemonId,
+        request.executionId(),
+        request.runId(),
+        request.sequence(),
+        request.type(),
+        request.contentDelta(),
+        request.payload() == null ? Map.of() : request.payload()
+    );
+    return ResponseEntity.accepted().body(Map.of("accepted", true));
+  }
+
+  @GetMapping(value = "/workspaces/{workspaceId}/chat/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+  ResponseEntity<String> chatEvents(
+      @PathVariable String workspaceId,
+      @RequestParam(required = false) String runId,
+      @RequestParam(defaultValue = "0") int after
+  ) {
+    var events = state.chatStreamEvents(workspaceId, runId, after);
+    var body = new StringBuilder("retry: 250\n\n");
+    for (var event : events) {
+      body.append("id: ").append(event.sequence()).append('\n');
+      body.append("event: ").append(event.type()).append('\n');
+      body.append("data: ").append(json(event)).append("\n\n");
+    }
+    return ResponseEntity.ok()
+        .contentType(new MediaType(MediaType.TEXT_EVENT_STREAM, StandardCharsets.UTF_8))
+        .body(body.toString());
   }
 
   @PostMapping("/workspaces/{workspaceId}/tool-approvals/{executionId}/approve")
@@ -288,6 +423,26 @@ public class BrainxApiController {
     );
   }
 
+  @GetMapping("/skill-proposals")
+  List<SkillProposalRecord> skillProposals() {
+    return state.skillProposals();
+  }
+
+  @PostMapping("/skill-proposals/{proposalId}/approve")
+  SkillProposalRecord approveSkillProposal(@PathVariable String proposalId) {
+    return state.approveSkillProposal(proposalId);
+  }
+
+  @PostMapping("/skill-proposals/{proposalId}/reject")
+  SkillProposalRecord rejectSkillProposal(@PathVariable String proposalId) {
+    return state.rejectSkillProposal(proposalId);
+  }
+
+  @GetMapping("/workspaces/{workspaceId}/skills")
+  Map<String, Object> workspaceSkills(@PathVariable String workspaceId) {
+    return state.skillInventory(workspaceId);
+  }
+
   public record CreateWorkspaceRequest(@NotBlank String name) {}
 
   public record AuthRequest(@NotBlank String username, @NotBlank String password) {}
@@ -296,7 +451,11 @@ public class BrainxApiController {
 
   public record CreateRunRequest(@NotBlank String goal) {}
 
-  public record SendChatMessageRequest(@NotBlank String content) {}
+  public record CreateChatSessionRequest(String title) {}
+
+  public record UpdateChatSessionRequest(String title) {}
+
+  public record SendChatMessageRequest(@NotBlank String content, List<Map<String, Object>> attachments) {}
 
   public record ChatCommandRequest(@NotBlank String command, Map<String, Object> arguments) {}
 
@@ -343,6 +502,15 @@ public class BrainxApiController {
     }
   }
 
+  public record SubmitExecutionStreamEventRequest(
+      @NotBlank String executionId,
+      @NotBlank String runId,
+      int sequence,
+      @NotBlank String type,
+      String contentDelta,
+      Map<String, Object> payload
+  ) {}
+
   public record CreateBranchRequest(@NotBlank String name, String description) {}
 
   public record CreateSkillProposalRequest(
@@ -353,6 +521,14 @@ public class BrainxApiController {
       @NotNull List<String> evidence,
       double confidence
   ) {}
+
+  private String json(Object value) {
+    try {
+      return mapper.writeValueAsString(value);
+    } catch (JsonProcessingException error) {
+      throw new BadRequestException("Failed to encode event stream payload.");
+    }
+  }
 
   private String bearerToken(String authorization) {
     if (authorization == null || !authorization.startsWith("Bearer ")) {
