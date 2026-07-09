@@ -18,6 +18,7 @@ target/
 !.env.example
 
 # Local brainx state and personal agent working files
+docs/
 .agent/
 .agents/
 .superpowers/
