@@ -34,7 +34,7 @@ describe('core pages', () => {
     expect(screen.getByRole('img', { name: 'Token usage by model' })).toBeInTheDocument();
     expect(screen.getByText('Tokens')).toBeInTheDocument();
     expect(screen.getByText('Cumulative token usage')).toBeInTheDocument();
-    expect(screen.queryByText('nvidia-step')).not.toBeInTheDocument();
+    expect(screen.queryByText('example-chat')).not.toBeInTheDocument();
     expect(document.querySelector('.agent-work-status-grid')).not.toBeNull();
     expect(document.querySelector('.dashboard-device-section')).not.toBeNull();
     expect(document.querySelector('.dashboard-device-grid')).toHaveClass('dashboard-device-list');

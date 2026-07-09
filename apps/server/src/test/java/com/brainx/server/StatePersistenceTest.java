@@ -74,7 +74,7 @@ class StatePersistenceTest {
         Map.of(),
         Map.of(),
         List.of(),
-        "nvidia:stepfun-ai/step-3.7-flash",
+        "primary:example-chat-model",
         List.of(),
         List.of(),
         now,
@@ -204,7 +204,7 @@ class StatePersistenceTest {
         Map.of(),
         Map.of(),
         List.of(),
-        "gpt-5.5",
+        "example-reasoning-model",
         List.of(),
         List.of(),
         now,
@@ -216,9 +216,9 @@ class StatePersistenceTest {
         Map.<String, Object>of(
             "models",
             List.of(
-                Map.of("name", "nvidia:01-ai/yi-large", "key", "nvidia:01-ai/yi-large", "providerName", "nvidia", "model", "01-ai/yi-large", "protocol", "openai"),
-                Map.of("name", "nvidia:stepfun-ai/step-3.7-flash", "key", "nvidia:stepfun-ai/step-3.7-flash", "providerName", "nvidia", "model", "stepfun-ai/step-3.7-flash", "protocol", "openai"),
-                Map.of("name", "gpt:gpt-5.5", "key", "gpt:gpt-5.5", "providerName", "gpt", "model", "gpt-5.5", "protocol", "openai")
+                Map.of("name", "primary:01-ai/yi-large", "key", "primary:01-ai/yi-large", "providerName", "primary", "model", "01-ai/yi-large", "protocol", "openai"),
+                Map.of("name", "primary:example-chat-model", "key", "primary:example-chat-model", "providerName", "primary", "model", "example-chat-model", "protocol", "openai"),
+                Map.of("name", "secondary:example-reasoning-model", "key", "secondary:example-reasoning-model", "providerName", "secondary", "model", "example-reasoning-model", "protocol", "openai")
             )
         )
     );
@@ -226,12 +226,12 @@ class StatePersistenceTest {
         Map.of("chat_model", session),
         Map.of(),
         Map.of(),
-        Map.of("w_core", "gpt-5.5"),
+        Map.of("w_core", "example-reasoning-model"),
         catalog,
         Map.of("w_core", new WorkspaceRecord("w_core", "Brainx Local", "~/.brainx/workspace", true, "active", now))
     )));
 
-    assertThat(state.getChatSession("w_core", "chat_model").activeModelName()).isEqualTo("gpt:gpt-5.5");
+    assertThat(state.getChatSession("w_core", "chat_model").activeModelName()).isEqualTo("secondary:example-reasoning-model");
   }
 
   private static BrainxStateSnapshot emptySnapshot(Map<String, ChatSessionRecord> chatSessions) {

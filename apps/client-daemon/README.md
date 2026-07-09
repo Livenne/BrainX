@@ -36,7 +36,7 @@ BRAINX_CONFIG_PATH=/path/to/config.json
 
 ## Configuration
 
-The default config is created at `~/.brainx/config.json` and uses placeholder provider references. A typical test config looks like:
+The default config is created at `~/.brainx/config.json` and uses placeholder provider references. Replace the provider names, URLs, protocols, model IDs, and environment variable names with the services you actually use. A typical local config looks like:
 
 ```json
 {
@@ -44,20 +44,20 @@ The default config is created at `~/.brainx/config.json` and uses placeholder pr
   "deviceName": "your-hostname",
   "providers": [
     {
-      "name": "nvidia",
-      "baseUrl": "https://integrate.api.nvidia.com/v1",
-      "apiKey": "env:NVIDIA_API_KEY",
+      "name": "primary",
+      "baseUrl": "https://api.primary-model.example/v1",
+      "apiKey": "env:BRAINX_MODEL_API_KEY",
       "protocol": "openai"
     }
   ],
   "webSearch": {
     "provider": "tavily",
     "baseUrl": "https://api.tavily.com",
-    "apiKey": "env:TAVILY_API_KEY",
+    "apiKey": "env:BRAINX_WEB_SEARCH_API_KEY",
     "timeoutSeconds": 20
   },
   "modelContextWindows": {
-    "nvidia:stepfun-ai/step-3.7-flash": 256000
+    "primary:example-chat-model": 256000
   }
 }
 ```

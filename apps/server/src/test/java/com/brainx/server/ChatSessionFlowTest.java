@@ -32,8 +32,8 @@ class ChatSessionFlowTest {
     assertThat(created.get("title").isNull()).isTrue();
     assertThat(created.get("messages")).hasSize(0);
     assertThat(created.get("availableModels").toString())
-        .contains("nvidia:stepfun-ai/step-3.7-flash")
-        .contains("gpt:gpt-5.5");
+        .contains("primary:example-chat-model")
+        .contains("secondary:example-reasoning-model");
 
     postJson("/api/v1/workspaces/w_core/chat/sessions/" + created.get("id").asText() + "/messages", """
       {"content":"新会话第一轮"}

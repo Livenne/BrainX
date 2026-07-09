@@ -242,7 +242,7 @@ describe('chat interaction polish', () => {
           tool_call_id: 'call_env',
           name: 'get_environment',
           content:
-            '{"os":"Ubuntu 24.04 / WSL","arch":"x86_64","workspaceRoot":"/home/Livenne/code/brainx","defaultShell":"bash","model":{"name":"stepfun-ai/step-3.7-flash"},"dateTime":{"iso":"2026-07-08T15:30:00+08:00","timezone":"Asia/Shanghai","utcOffset":"+08:00"}}'
+            '{"os":"Ubuntu 24.04 / WSL","arch":"x86_64","workspaceRoot":"/home/Livenne/code/brainx","defaultShell":"bash","model":{"name":"example-chat-model"},"dateTime":{"iso":"2026-07-08T15:30:00+08:00","timezone":"Asia/Shanghai","utcOffset":"+08:00"}}'
         }
       ]
     });
@@ -253,7 +253,7 @@ describe('chat interaction polish', () => {
     await user.click(envToggle);
 
     expect(screen.getByText('Ubuntu 24.04 / WSL')).toBeInTheDocument();
-    expect(screen.getByText('stepfun-ai/step-3.7-flash')).toBeInTheDocument();
+    expect(screen.getByText('example-chat-model')).toBeInTheDocument();
     expect(screen.queryByText('completed')).not.toBeInTheDocument();
   });
 
@@ -261,10 +261,10 @@ describe('chat interaction polish', () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      activeModelName: 'primary:example-chat-model',
       availableModels: [
-        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'primary:example-chat-model', providerName: 'primary', model: 'example-chat-model', protocol: 'openai' },
+        { name: 'secondary:example-reasoning-model', providerName: 'secondary', model: 'example-reasoning-model', protocol: 'openai' }
       ]
     });
     await selectSession(user);
@@ -274,19 +274,19 @@ describe('chat interaction polish', () => {
     await user.keyboard('{Enter}');
     await user.keyboard('{ArrowDown}{Enter}');
 
-    await waitFor(() => expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt:gpt-5.5'));
-    expect(await screen.findByText('模型已切换到 gpt:gpt-5.5')).toBeInTheDocument();
-    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt:gpt-5.5' }, 'chat_main');
+    await waitFor(() => expect(screen.getByLabelText('Current model')).toHaveTextContent('secondary:example-reasoning-model'));
+    expect(await screen.findByText('模型已切换到 secondary:example-reasoning-model')).toBeInTheDocument();
+    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'secondary:example-reasoning-model' }, 'chat_main');
   });
 
   it('switches model from a pointer selection without submitting the active model again', async () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      activeModelName: 'primary:example-chat-model',
       availableModels: [
-        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'primary:example-chat-model', providerName: 'primary', model: 'example-chat-model', protocol: 'openai' },
+        { name: 'secondary:example-reasoning-model', providerName: 'secondary', model: 'example-reasoning-model', protocol: 'openai' }
       ]
     });
     await selectSession(user);
@@ -294,11 +294,11 @@ describe('chat interaction polish', () => {
     const composer = await screen.findByRole('textbox', { name: 'Message brainx' });
     await user.type(composer, '/模型');
     await user.keyboard('{Enter}');
-    await user.click(await screen.findByRole('option', { name: /gpt:gpt-5\.5/ }));
+    await user.click(await screen.findByRole('option', { name: /secondary:example-reasoning-model/ }));
 
-    await waitFor(() => expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt:gpt-5.5' }, 'chat_main'));
-    expect(sendChatCommand).not.toHaveBeenCalledWith('w_core', 'model', { modelName: 'nvidia:stepfun-ai/step-3.7-flash' }, 'chat_main');
-    expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt:gpt-5.5');
+    await waitFor(() => expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'secondary:example-reasoning-model' }, 'chat_main'));
+    expect(sendChatCommand).not.toHaveBeenCalledWith('w_core', 'model', { modelName: 'primary:example-chat-model' }, 'chat_main');
+    expect(screen.getByLabelText('Current model')).toHaveTextContent('secondary:example-reasoning-model');
   });
 
   it('opens a workdir dialog with the current workspace path and submits workspace command', async () => {
@@ -428,8 +428,8 @@ describe('chat interaction polish', () => {
         {
           id: 'notice_model',
           kind: 'model_changed',
-          message: '已切换模型：gpt-5.5',
-          detail: 'gpt-5.5',
+          message: '已切换模型：secondary:example-reasoning-model',
+          detail: 'secondary:example-reasoning-model',
           afterMessageIndex: 2,
           createdAt: '2026-07-08T00:01:00.000Z'
         }
@@ -439,10 +439,10 @@ describe('chat interaction polish', () => {
 
     const stream = await screen.findByRole('log', { name: 'Agent loop timeline' });
     const texts = within(stream)
-      .getAllByText(/Before model switch|Before response|已切换模型：gpt-5\.5|After model switch|After response/)
+      .getAllByText(/Before model switch|Before response|已切换模型：secondary:example-reasoning-model|After model switch|After response/)
       .map((node) => node.textContent);
 
-    expect(texts).toEqual(['Before model switch', 'Before response', '已切换模型：gpt-5.5', 'After model switch', 'After response']);
+    expect(texts).toEqual(['Before model switch', 'Before response', '已切换模型：secondary:example-reasoning-model', 'After model switch', 'After response']);
   });
 
   it('does not append legacy command notices without anchors to the bottom of the timeline', async () => {
@@ -459,8 +459,8 @@ describe('chat interaction polish', () => {
         {
           id: 'notice_legacy_model',
           kind: 'model_changed',
-          message: '已切换模型：gpt-5.5',
-          detail: 'gpt-5.5',
+          message: '已切换模型：secondary:example-reasoning-model',
+          detail: 'secondary:example-reasoning-model',
           createdAt: '2026-07-08T00:01:00.000Z'
         }
       ]
@@ -469,10 +469,10 @@ describe('chat interaction polish', () => {
 
     const stream = await screen.findByRole('log', { name: 'Agent loop timeline' });
     const texts = within(stream)
-      .getAllByText(/已切换模型：gpt-5\.5|First message|First response|Second message|Second response/)
+      .getAllByText(/已切换模型：secondary:example-reasoning-model|First message|First response|Second message|Second response/)
       .map((node) => node.textContent);
 
-    expect(texts).toEqual(['已切换模型：gpt-5.5', 'First message', 'First response', 'Second message', 'Second response']);
+    expect(texts).toEqual(['已切换模型：secondary:example-reasoning-model', 'First message', 'First response', 'Second message', 'Second response']);
   });
 
   it('removes the failed user bubble before retrying that message', async () => {
@@ -504,18 +504,18 @@ describe('chat interaction polish', () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      activeModelName: 'primary:example-chat-model',
       availableModels: [
-        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'primary:example-chat-model', providerName: 'primary', model: 'example-chat-model', protocol: 'openai' },
+        { name: 'secondary:example-reasoning-model', providerName: 'secondary', model: 'example-reasoning-model', protocol: 'openai' }
       ]
     });
     vi.mocked(sendChatCommand).mockResolvedValueOnce({
       ...baseSession,
-      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      activeModelName: 'primary:example-chat-model',
       availableModels: [
-        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'primary:example-chat-model', providerName: 'primary', model: 'example-chat-model', protocol: 'openai' },
+        { name: 'secondary:example-reasoning-model', providerName: 'secondary', model: 'example-reasoning-model', protocol: 'openai' }
       ]
     });
     await selectSession(user);
@@ -525,8 +525,8 @@ describe('chat interaction polish', () => {
     await user.keyboard('{Enter}');
     await user.keyboard('{ArrowDown}{Enter}');
 
-    expect(await screen.findByText('模型切换未生效：服务器返回 nvidia:stepfun-ai/step-3.7-flash')).toBeInTheDocument();
-    expect(screen.queryByText('模型已切换到 nvidia:stepfun-ai/step-3.7-flash')).not.toBeInTheDocument();
+    expect(await screen.findByText('模型切换未生效：服务器返回 primary:example-chat-model')).toBeInTheDocument();
+    expect(screen.queryByText('模型已切换到 primary:example-chat-model')).not.toBeInTheDocument();
   });
 
   it('opens row actions for a non-selected session without switching sessions', async () => {
@@ -910,9 +910,9 @@ describe('chat interaction polish', () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      activeModelName: 'primary:example-chat-model',
       availableModels: [
-        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai', contextWindow: 128000 },
+        { name: 'primary:example-chat-model', providerName: 'primary', model: 'example-chat-model', protocol: 'openai', contextWindow: 128000 },
         { name: 'local:qwen/qwen3-coder', providerName: 'local', model: 'qwen/qwen3-coder', protocol: 'openai', contextWindow: 64000 }
       ]
     });
@@ -1112,10 +1112,10 @@ describe('chat interaction polish', () => {
     const user = userEvent.setup();
     const listedSession = {
       ...baseSession,
-      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      activeModelName: 'primary:example-chat-model',
       availableModels: [
-        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai', contextWindow: 128000 },
-        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai', contextWindow: 128000 }
+        { name: 'primary:example-chat-model', providerName: 'primary', model: 'example-chat-model', protocol: 'openai', contextWindow: 128000 },
+        { name: 'secondary:example-reasoning-model', providerName: 'secondary', model: 'example-reasoning-model', protocol: 'openai', contextWindow: 128000 }
       ]
     };
     const createdSession = {
@@ -1128,7 +1128,7 @@ describe('chat interaction polish', () => {
     vi.mocked(createChatSession).mockResolvedValue(createdSession);
     vi.mocked(sendChatCommand).mockResolvedValue({
       ...createdSession,
-      activeModelName: 'gpt:gpt-5.5'
+      activeModelName: 'secondary:example-reasoning-model'
     });
 
     const composer = await screen.findByRole('textbox', { name: 'Message brainx' });
@@ -1137,7 +1137,7 @@ describe('chat interaction polish', () => {
     await user.keyboard('{ArrowDown}{Enter}');
 
     await waitFor(() => expect(createChatSession).toHaveBeenCalledWith('w_core'));
-    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt:gpt-5.5' }, 'chat_created');
-    expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt:gpt-5.5');
+    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'secondary:example-reasoning-model' }, 'chat_created');
+    expect(screen.getByLabelText('Current model')).toHaveTextContent('secondary:example-reasoning-model');
   });
 });

@@ -68,8 +68,8 @@ fn get_environment_reports_runtime_without_provider_details() {
     assert!(result["dateTime"]["iso"].as_str().unwrap_or_default().contains('T'));
     assert!(result["dateTime"]["timezone"].as_str().unwrap_or_default().len() > 1);
     assert!(result["dateTime"]["utcOffset"].as_str().unwrap_or_default().starts_with(['+', '-']));
-    assert_eq!(result["model"]["name"], "nvidia:stepfun-ai/step-3.7-flash");
-    assert_eq!(result["model"]["model"], "stepfun-ai/step-3.7-flash");
+    assert_eq!(result["model"]["name"], "primary:example-chat-model");
+    assert_eq!(result["model"]["model"], "example-chat-model");
     assert!(result["model"].get("provider").is_none());
     assert!(result["model"].get("baseUrl").is_none());
 }
@@ -77,12 +77,12 @@ fn get_environment_reports_runtime_without_provider_details() {
 #[test]
 fn get_environment_reports_selected_request_model() {
     let workspace = tempfile::tempdir().unwrap();
-    let tools = WorkspaceTools::new(workspace.path()).with_active_model_info("gpt:gpt-5.5", "gpt-5.5");
+    let tools = WorkspaceTools::new(workspace.path()).with_active_model_info("secondary:example-reasoning-model", "example-reasoning-model");
 
     let result = tools.execute("get_env", &json!({})).expect("environment should load");
 
-    assert_eq!(result["model"]["name"], "gpt:gpt-5.5");
-    assert_eq!(result["model"]["model"], "gpt-5.5");
+    assert_eq!(result["model"]["name"], "secondary:example-reasoning-model");
+    assert_eq!(result["model"]["model"], "example-reasoning-model");
 }
 
 #[test]

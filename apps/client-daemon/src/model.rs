@@ -7,10 +7,10 @@ use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
-const DEFAULT_MODEL: &str = "stepfun-ai/step-3.7-flash";
-const DEFAULT_PROVIDER_NAME: &str = "nvidia";
-const DEFAULT_MODEL_KEY: &str = "nvidia:stepfun-ai/step-3.7-flash";
-const DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
+const DEFAULT_MODEL: &str = "example-chat-model";
+const DEFAULT_PROVIDER_NAME: &str = "primary";
+const DEFAULT_MODEL_KEY: &str = "primary:example-chat-model";
+const DEFAULT_BASE_URL: &str = "https://api.primary-model.example/v1";
 
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
@@ -35,9 +35,9 @@ pub struct ModelCatalogEntry {
 impl ModelConfig {
     pub fn from_env() -> Result<Self> {
         Self::from_env_values(
-            std::env::var("NVIDIA_API_KEY").ok(),
-            std::env::var("BRAINX_NVIDIA_MODEL").ok(),
-            std::env::var("BRAINX_NVIDIA_BASE_URL").ok(),
+            std::env::var("BRAINX_MODEL_API_KEY").ok(),
+            std::env::var("BRAINX_MODEL_ID").ok(),
+            std::env::var("BRAINX_MODEL_BASE_URL").ok(),
         )
     }
 
@@ -48,7 +48,7 @@ impl ModelConfig {
     ) -> Result<Self> {
         let api_key = api_key
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow!("NVIDIA_API_KEY is required for model.invoke"))?;
+            .ok_or_else(|| anyhow!("BRAINX_MODEL_API_KEY is required for model.invoke"))?;
         Ok(Self {
             name: DEFAULT_MODEL_KEY.to_string(),
             provider_name: DEFAULT_PROVIDER_NAME.to_string(),
@@ -361,7 +361,7 @@ fn build_openai_chat_payload_with_stream(model: &str, input: &Value, stream: boo
 
 fn model_supports_enable_thinking(model: &str) -> bool {
     let normalized = model.to_lowercase();
-    normalized.contains("stepfun-ai/step-") || normalized.contains("step-3.7")
+    normalized.contains("example-chat-model") || normalized.contains("example-chat-model")
 }
 
 pub fn build_anthropic_messages_payload(model: &str, input: &Value) -> Result<Value> {
@@ -645,7 +645,7 @@ fn normalize_model_response(response: &Value, protocol: &str) -> Result<Value> {
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
-        .ok_or_else(|| anyhow!("NVIDIA response did not include choices[0].message"))?;
+        .ok_or_else(|| anyhow!("model provider response did not include choices[0].message"))?;
 
     let role = message
         .get("role")

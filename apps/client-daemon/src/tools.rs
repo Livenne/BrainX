@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-const DEFAULT_MODEL: &str = "stepfun-ai/step-3.7-flash";
-const DEFAULT_MODEL_NAME: &str = "nvidia:stepfun-ai/step-3.7-flash";
+const DEFAULT_MODEL: &str = "example-chat-model";
+const DEFAULT_MODEL_NAME: &str = "primary:example-chat-model";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const MAX_TIMEOUT_SECONDS: u64 = 300;
 const DEFAULT_BACKGROUND_RUNTIME_SECONDS: u64 = 3600;

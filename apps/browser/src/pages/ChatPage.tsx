@@ -2996,7 +2996,7 @@ export function ChatPage() {
   const derivedTodos = selectedSession ? deriveTodoState(selectedSession) : [];
   const derivedTerminals = selectedSession ? deriveTerminalState(selectedSession) : [];
   const modelOptions = selectedSession?.availableModels ?? sessions.find((session) => session.availableModels?.length)?.availableModels ?? [];
-  const currentModelName = selectedSession?.activeModelName ?? modelOptions[0]?.name ?? 'nvidia:stepfun-ai/step-3.7-flash';
+  const currentModelName = selectedSession?.activeModelName ?? modelOptions[0]?.name ?? 'primary:example-chat-model';
   const hasSidePanel = true;
 
   return (

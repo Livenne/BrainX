@@ -203,21 +203,21 @@ export const chatSessions: ChatSession[] = [
     clientName: daemons[0].name,
     runId: 'run_8f3a',
     runStatus: 'waiting_for_approval',
-    activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+    activeModelName: 'primary:example-chat-model',
     availableModels: [
       {
-        name: 'nvidia:stepfun-ai/step-3.7-flash',
-        key: 'nvidia:stepfun-ai/step-3.7-flash',
-        providerName: 'nvidia',
-        model: 'stepfun-ai/step-3.7-flash',
+        name: 'primary:example-chat-model',
+        key: 'primary:example-chat-model',
+        providerName: 'primary',
+        model: 'example-chat-model',
         protocol: 'openai',
         contextWindow: 128000
       },
       {
-        name: 'gpt:gpt-5.5',
-        key: 'gpt:gpt-5.5',
-        providerName: 'gpt',
-        model: 'gpt-5.5',
+        name: 'secondary:example-reasoning-model',
+        key: 'secondary:example-reasoning-model',
+        providerName: 'secondary',
+        model: 'example-reasoning-model',
         protocol: 'openai',
         contextWindow: 128000
       }

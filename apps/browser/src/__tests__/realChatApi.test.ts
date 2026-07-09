@@ -201,19 +201,19 @@ describe('brainx real chat API', () => {
   });
 
   it('sends slash commands to the command endpoint without message content', async () => {
-    const fetch = vi.fn(() => okJson({ ...session, activeModelName: 'nvidia:stepfun-ai/step-3.7-flash' }));
+    const fetch = vi.fn(() => okJson({ ...session, activeModelName: 'primary:example-chat-model' }));
     vi.stubGlobal('fetch', fetch);
 
-    const result = await sendChatCommand('w_core', 'model', { modelName: 'nvidia:stepfun-ai/step-3.7-flash' });
+    const result = await sendChatCommand('w_core', 'model', { modelName: 'primary:example-chat-model' });
 
-    expect(result.activeModelName).toBe('nvidia:stepfun-ai/step-3.7-flash');
+    expect(result.activeModelName).toBe('primary:example-chat-model');
     expect(fetch).toHaveBeenCalledWith('/api/v1/workspaces/w_core/chat/commands', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ command: 'model', arguments: { modelName: 'nvidia:stepfun-ai/step-3.7-flash' } })
+      body: JSON.stringify({ command: 'model', arguments: { modelName: 'primary:example-chat-model' } })
     });
   });
 
@@ -337,7 +337,7 @@ describe('brainx real chat API', () => {
       chatSessions: [],
       recentEvents: [],
       stats: {
-        tokenUsage: { total: 42, byModel: [{ modelName: 'nvidia:stepfun-ai/step-3.7-flash', totalTokens: 42 }] },
+        tokenUsage: { total: 42, byModel: [{ modelName: 'primary:example-chat-model', totalTokens: 42 }] },
         runningByClient: []
       }
     };

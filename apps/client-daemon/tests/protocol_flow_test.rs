@@ -233,15 +233,15 @@ async fn run_once_syncs_skill_inventory_after_skill_apply() {
 }
 
 #[tokio::test]
-async fn run_once_executes_model_invoke_with_local_nvidia_key() {
+async fn run_once_executes_model_invoke_with_local_model_provider_key() {
     let _env_guard = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let model_server = MockServer::start().await;
     let workspace = tempfile::tempdir().unwrap();
 
-    std::env::set_var("NVIDIA_API_KEY", "test-api-key");
-    std::env::set_var("BRAINX_NVIDIA_MODEL", "test-model");
-    std::env::set_var("BRAINX_NVIDIA_BASE_URL", format!("{}/v1", model_server.uri()));
+    std::env::set_var("BRAINX_MODEL_API_KEY", "test-api-key");
+    std::env::set_var("BRAINX_MODEL_ID", "test-model");
+    std::env::set_var("BRAINX_MODEL_BASE_URL", format!("{}/v1", model_server.uri()));
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -296,9 +296,9 @@ async fn run_once_executes_model_invoke_with_local_nvidia_key() {
 
     let result = run_once(&server.uri(), "workspace_1", "devbox", workspace.path()).await;
 
-    std::env::remove_var("NVIDIA_API_KEY");
-    std::env::remove_var("BRAINX_NVIDIA_MODEL");
-    std::env::remove_var("BRAINX_NVIDIA_BASE_URL");
+    std::env::remove_var("BRAINX_MODEL_API_KEY");
+    std::env::remove_var("BRAINX_MODEL_ID");
+    std::env::remove_var("BRAINX_MODEL_BASE_URL");
 
     assert!(result.is_ok());
     let requests = server.received_requests().await.unwrap();
@@ -321,9 +321,9 @@ async fn run_once_executes_model_tool_calls_locally_until_final_answer() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::write(workspace.path().join("README.md"), "brainx workspace\n").unwrap();
 
-    std::env::set_var("NVIDIA_API_KEY", "test-api-key");
-    std::env::set_var("BRAINX_NVIDIA_MODEL", "test-model");
-    std::env::set_var("BRAINX_NVIDIA_BASE_URL", format!("{}/v1", model_server.uri()));
+    std::env::set_var("BRAINX_MODEL_API_KEY", "test-api-key");
+    std::env::set_var("BRAINX_MODEL_ID", "test-model");
+    std::env::set_var("BRAINX_MODEL_BASE_URL", format!("{}/v1", model_server.uri()));
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -420,9 +420,9 @@ async fn run_once_executes_model_tool_calls_locally_until_final_answer() {
 
     let result = run_once(&server.uri(), "workspace_1", "devbox", workspace.path()).await;
 
-    std::env::remove_var("NVIDIA_API_KEY");
-    std::env::remove_var("BRAINX_NVIDIA_MODEL");
-    std::env::remove_var("BRAINX_NVIDIA_BASE_URL");
+    std::env::remove_var("BRAINX_MODEL_API_KEY");
+    std::env::remove_var("BRAINX_MODEL_ID");
+    std::env::remove_var("BRAINX_MODEL_BASE_URL");
 
     assert!(result.is_ok());
     let requests = server.received_requests().await.unwrap();
@@ -443,9 +443,9 @@ async fn run_once_rejects_streamed_empty_tool_name_before_tool_execution() {
     let model_server = MockServer::start().await;
     let workspace = tempfile::tempdir().unwrap();
 
-    std::env::set_var("NVIDIA_API_KEY", "test-api-key");
-    std::env::set_var("BRAINX_NVIDIA_MODEL", "test-model");
-    std::env::set_var("BRAINX_NVIDIA_BASE_URL", format!("{}/v1", model_server.uri()));
+    std::env::set_var("BRAINX_MODEL_API_KEY", "test-api-key");
+    std::env::set_var("BRAINX_MODEL_ID", "test-model");
+    std::env::set_var("BRAINX_MODEL_BASE_URL", format!("{}/v1", model_server.uri()));
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -498,9 +498,9 @@ async fn run_once_rejects_streamed_empty_tool_name_before_tool_execution() {
 
     let result = run_once(&server.uri(), "workspace_1", "devbox", workspace.path()).await;
 
-    std::env::remove_var("NVIDIA_API_KEY");
-    std::env::remove_var("BRAINX_NVIDIA_MODEL");
-    std::env::remove_var("BRAINX_NVIDIA_BASE_URL");
+    std::env::remove_var("BRAINX_MODEL_API_KEY");
+    std::env::remove_var("BRAINX_MODEL_ID");
+    std::env::remove_var("BRAINX_MODEL_BASE_URL");
 
     assert!(result.is_ok());
     let requests = server.received_requests().await.unwrap();

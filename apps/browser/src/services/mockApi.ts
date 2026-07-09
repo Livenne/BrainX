@@ -446,7 +446,7 @@ export async function sendChatCommand(
 
   if (command === 'model') {
     const modelName = typeof args.modelName === 'string' ? args.modelName : '';
-    const exists = session.availableModels?.some((model) => model.name === modelName || model.key === modelName) ?? modelName === 'nvidia:stepfun-ai/step-3.7-flash';
+    const exists = session.availableModels?.some((model) => model.name === modelName || model.key === modelName) ?? modelName === 'primary:example-chat-model';
     if (!modelName || !exists) {
       throw new Error(`Unknown model: ${modelName}`);
     }

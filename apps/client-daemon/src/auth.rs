@@ -198,15 +198,15 @@ fn new_installation_id() -> String {
 fn default_providers() -> Vec<ClientProviderConfig> {
     vec![
         ClientProviderConfig {
-            name: "nvidia".to_string(),
-            base_url: "https://integrate.api.nvidia.com/v1".to_string(),
-            api_key: "env:NVIDIA_API_KEY".to_string(),
+            name: "primary".to_string(),
+            base_url: "https://api.primary-model.example/v1".to_string(),
+            api_key: "env:BRAINX_MODEL_API_KEY".to_string(),
             protocol: "openai".to_string(),
         },
         ClientProviderConfig {
-            name: "gpt".to_string(),
-            base_url: "https://api.shangan9.cc.cd/v1".to_string(),
-            api_key: "env:SHANGAN_API_KEY".to_string(),
+            name: "secondary".to_string(),
+            base_url: "https://api.secondary-model.example/v1".to_string(),
+            api_key: "env:BRAINX_SECONDARY_MODEL_API_KEY".to_string(),
             protocol: "openai".to_string(),
         },
     ]

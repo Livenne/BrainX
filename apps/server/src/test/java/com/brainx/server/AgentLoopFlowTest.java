@@ -35,7 +35,7 @@ class AgentLoopFlowTest {
     assertThat(request.get("toolName").asText()).isEqualTo("model.invoke");
     assertThat(request.get("input").get("phase").asText()).isEqualTo("agent_loop");
     assertThat(request.get("input").has("tools")).isFalse();
-    assertThat(request.get("input").get("modelName").asText()).isEqualTo("nvidia:stepfun-ai/step-3.7-flash");
+    assertThat(request.get("input").get("modelName").asText()).isEqualTo("primary:example-chat-model");
     assertThat(request.get("input").get("currentWorkspace").asText()).isEqualTo("~/.brainx/workspace");
     assertThat(request.get("input").get("messages").get(0).get("role").asText()).isEqualTo("system");
     assertThat(request.get("input").get("messages").get(1).get("content").asText()).isEqualTo("查看当前目录");

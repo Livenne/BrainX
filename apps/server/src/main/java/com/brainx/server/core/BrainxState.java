@@ -40,7 +40,7 @@ public class BrainxState {
   private static final Set<String> SUPPORTED_TOOLS = union(union(LOCAL_TOOLS, BROWSER_TOOLS), SERVER_TOOLS);
   private static final Set<String> ZERO_ARGUMENT_TOOLS = Set.of("get_env");
   private static final Set<String> CHAT_COMMANDS = Set.of("compact", "clear", "new", "model", "session", "fork", "init", "rename", "delete", "workspace");
-  private static final String DEFAULT_MODEL_NAME = "nvidia:stepfun-ai/step-3.7-flash";
+  private static final String DEFAULT_MODEL_NAME = "primary:example-chat-model";
   private static final int DEFAULT_CONTEXT_WINDOW = 128_000;
   private static final int MAX_TOOL_RESULT_MESSAGE_CHARS = 64_000;
   private static final int MAX_ATTACHMENTS_PER_MESSAGE = 15;
@@ -3636,15 +3636,15 @@ public class BrainxState {
         Map.of(
             "name", DEFAULT_MODEL_NAME,
             "key", DEFAULT_MODEL_NAME,
-            "providerName", "nvidia",
-            "model", "stepfun-ai/step-3.7-flash",
+            "providerName", "primary",
+            "model", "example-chat-model",
             "protocol", "openai"
         ),
         Map.of(
-            "name", "gpt:gpt-5.5",
-            "key", "gpt:gpt-5.5",
-            "providerName", "gpt",
-            "model", "gpt-5.5",
+            "name", "secondary:example-reasoning-model",
+            "key", "secondary:example-reasoning-model",
+            "providerName", "secondary",
+            "model", "example-reasoning-model",
             "protocol", "openai"
         )
     );
@@ -3683,7 +3683,7 @@ public class BrainxState {
     if (!defaultModel.isBlank()) {
       return defaultModel;
     }
-    var defaultModelId = modelNameByModelId(models, "stepfun-ai/step-3.7-flash");
+    var defaultModelId = modelNameByModelId(models, "example-chat-model");
     if (!defaultModelId.isBlank()) {
       return defaultModelId;
     }
@@ -3712,8 +3712,8 @@ public class BrainxState {
     if (normalized.isBlank() || normalized.contains(":")) {
       return "";
     }
-    if ("nvidia-step".equals(normalized)) {
-      normalized = "stepfun-ai/step-3.7-flash";
+    if ("example-chat".equals(normalized)) {
+      normalized = "example-chat-model";
     }
     var modelId = normalized;
     return models.stream()

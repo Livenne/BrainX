@@ -685,7 +685,7 @@ function ContextSnapshotBubble() {
           <span>workspace-core</span>
           <span>mainline</span>
           <span>brainx-client-local</span>
-          <span>nvidia/llama-3.3-nemotron</span>
+          <span>primary/example-chat-model</span>
         </div>
       </div>
     </article>

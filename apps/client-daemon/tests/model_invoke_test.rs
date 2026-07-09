@@ -14,14 +14,14 @@ async fn model_discovery_lists_openai_compatible_provider_models() {
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
-                {"id": "stepfun-ai/step-3.7-flash", "context_window": 128000},
+                {"id": "example-chat-model", "context_window": 128000},
                 {"id": "openai/gpt-test"}
             ]
         })))
         .mount(&server)
         .await;
     let provider = ClientProviderConfig {
-        name: "nvidia".to_string(),
+        name: "primary".to_string(),
         base_url: format!("{}/v1", server.uri()),
         api_key: "literal:test-api-key".to_string(),
         protocol: "openai".to_string(),
@@ -31,9 +31,9 @@ async fn model_discovery_lists_openai_compatible_provider_models() {
     let models = discover_provider_models(&provider, &overrides).await.unwrap();
 
     assert_eq!(models.len(), 2);
-    assert_eq!(models[0].key, "nvidia:stepfun-ai/step-3.7-flash");
-    assert_eq!(models[0].provider_name, "nvidia");
-    assert_eq!(models[0].model, "stepfun-ai/step-3.7-flash");
+    assert_eq!(models[0].key, "primary:example-chat-model");
+    assert_eq!(models[0].provider_name, "primary");
+    assert_eq!(models[0].model, "example-chat-model");
     assert_eq!(models[0].protocol, "openai");
     assert_eq!(models[0].context_window, Some(128000));
     let requests = server.received_requests().await.unwrap();
@@ -50,21 +50,21 @@ async fn model_discovery_applies_configured_context_window_overrides() {
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
-                {"id": "stepfun-ai/step-3.7-flash"},
-                {"id": "gpt-5.5", "context_window": 128000}
+                {"id": "example-chat-model"},
+                {"id": "example-reasoning-model", "context_window": 128000}
             ]
         })))
         .mount(&server)
         .await;
     let provider = ClientProviderConfig {
-        name: "nvidia".to_string(),
+        name: "primary".to_string(),
         base_url: format!("{}/v1", server.uri()),
         api_key: "literal:test-api-key".to_string(),
         protocol: "openai".to_string(),
     };
     let overrides = [
-        ("nvidia:stepfun-ai/step-3.7-flash".to_string(), 256_000),
-        ("nvidia:gpt-5.5".to_string(), 1_050_000),
+        ("primary:example-chat-model".to_string(), 256_000),
+        ("primary:example-reasoning-model".to_string(), 1_050_000),
     ]
     .into_iter()
     .collect();
@@ -110,7 +110,7 @@ async fn model_invoke_posts_openai_request_and_normalizes_tool_calls() {
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl_1",
-            "model": "stepfun-ai/step-3.7-flash",
+            "model": "example-chat-model",
             "choices": [{
                 "message": {
                     "role": "assistant",
@@ -134,7 +134,7 @@ async fn model_invoke_posts_openai_request_and_normalizes_tool_calls() {
         name: "test-openai".to_string(),
         provider_name: "test".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "stepfun-ai/step-3.7-flash".to_string(),
+        model: "example-chat-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -161,7 +161,7 @@ async fn model_invoke_posts_openai_request_and_normalizes_tool_calls() {
     assert_eq!(result["message"]["toolCalls"][0]["id"], "call_read_files");
     assert_eq!(result["message"]["toolCalls"][0]["name"], "read_files");
     assert_eq!(result["message"]["toolCalls"][0]["arguments"], json!({"files": [{"path": "apps/browser/package.json"}]}));
-    assert_eq!(result["model"], "stepfun-ai/step-3.7-flash");
+    assert_eq!(result["model"], "example-chat-model");
     assert_eq!(result["usage"]["total_tokens"], 28);
 
     let requests = server.received_requests().await.unwrap();
@@ -171,7 +171,7 @@ async fn model_invoke_posts_openai_request_and_normalizes_tool_calls() {
         "Bearer test-api-key"
     );
     let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-    assert_eq!(body["model"], "stepfun-ai/step-3.7-flash");
+    assert_eq!(body["model"], "example-chat-model");
     assert_eq!(body["messages"][1]["content"], "Read workspace files.");
     assert_eq!(body["tools"][0]["function"]["name"], "read_files");
 }
@@ -183,7 +183,7 @@ async fn model_invoke_accepts_openai_tool_call_argument_variants() {
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl_1",
-            "model": "gpt-5.5",
+            "model": "example-reasoning-model",
             "choices": [{
                 "finish_reason": "tool_calls",
                 "message": {
@@ -213,10 +213,10 @@ async fn model_invoke_accepts_openai_tool_call_argument_variants() {
         .await;
 
     let client = ModelClient::new(ModelConfig {
-        name: "gpt-5.5".to_string(),
-        provider_name: "gpt".to_string(),
+        name: "example-reasoning-model".to_string(),
+        provider_name: "secondary".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "gpt-5.5".to_string(),
+        model: "example-reasoning-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -241,7 +241,7 @@ async fn model_invoke_normalizes_gpt55_structured_content_tool_calls() {
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl_gpt55_tool",
-            "model": "gpt-5.5",
+            "model": "example-reasoning-model",
             "choices": [{
                 "finish_reason": "tool_calls",
                 "message": {
@@ -260,10 +260,10 @@ async fn model_invoke_normalizes_gpt55_structured_content_tool_calls() {
         .await;
 
     let client = ModelClient::new(ModelConfig {
-        name: "gpt-5.5".to_string(),
-        provider_name: "gpt".to_string(),
+        name: "example-reasoning-model".to_string(),
+        provider_name: "secondary".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "gpt-5.5".to_string(),
+        model: "example-reasoning-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -288,7 +288,7 @@ async fn model_invoke_rejects_unrecognized_tool_calls_without_empty_name_executi
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl_bad_tool",
-            "model": "gpt-5.5",
+            "model": "example-reasoning-model",
             "choices": [{
                 "finish_reason": "tool_calls",
                 "message": {
@@ -308,10 +308,10 @@ async fn model_invoke_rejects_unrecognized_tool_calls_without_empty_name_executi
         .await;
 
     let client = ModelClient::new(ModelConfig {
-        name: "gpt-5.5".to_string(),
-        provider_name: "gpt".to_string(),
+        name: "example-reasoning-model".to_string(),
+        provider_name: "secondary".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "gpt-5.5".to_string(),
+        model: "example-reasoning-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -332,7 +332,7 @@ async fn model_invoke_accepts_legacy_openai_function_call() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "model": "gpt-5.5",
+            "model": "example-reasoning-model",
             "choices": [{
                 "finish_reason": "function_call",
                 "message": {
@@ -349,10 +349,10 @@ async fn model_invoke_accepts_legacy_openai_function_call() {
         .await;
 
     let client = ModelClient::new(ModelConfig {
-        name: "gpt-5.5".to_string(),
-        provider_name: "gpt".to_string(),
+        name: "example-reasoning-model".to_string(),
+        provider_name: "secondary".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "gpt-5.5".to_string(),
+        model: "example-reasoning-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -528,7 +528,7 @@ async fn model_invoke_streaming_normalizes_openai_tool_call_object_argument_delt
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(
                     concat!(
-                        "data: {\"model\":\"gpt-5.5\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_search\",\"type\":\"function\",\"function\":{\"name\":\"search_workspace\",\"arguments\":{\"query\":\"toolcall\"}}}]}}]}\n\n",
+                        "data: {\"model\":\"example-reasoning-model\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_search\",\"type\":\"function\",\"function\":{\"name\":\"search_workspace\",\"arguments\":{\"query\":\"toolcall\"}}}]}}]}\n\n",
                         "data: [DONE]\n\n"
                     )
                 ),
@@ -537,10 +537,10 @@ async fn model_invoke_streaming_normalizes_openai_tool_call_object_argument_delt
         .await;
 
     let client = ModelClient::new(ModelConfig {
-        name: "gpt-5.5".to_string(),
-        provider_name: "gpt".to_string(),
+        name: "example-reasoning-model".to_string(),
+        provider_name: "secondary".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "gpt-5.5".to_string(),
+        model: "example-reasoning-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -570,7 +570,7 @@ async fn model_invoke_streaming_normalizes_gpt55_content_tool_call_deltas() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(
                     concat!(
-                        "data: {\"model\":\"gpt-5.5\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"tool_call\",\"id\":\"call_env\",\"function_name\":\"get_env\",\"arguments\":{}}]}}]}\n\n",
+                        "data: {\"model\":\"example-reasoning-model\",\"choices\":[{\"delta\":{\"content\":[{\"type\":\"tool_call\",\"id\":\"call_env\",\"function_name\":\"get_env\",\"arguments\":{}}]}}]}\n\n",
                         "data: [DONE]\n\n"
                     )
                 ),
@@ -579,10 +579,10 @@ async fn model_invoke_streaming_normalizes_gpt55_content_tool_call_deltas() {
         .await;
 
     let client = ModelClient::new(ModelConfig {
-        name: "gpt-5.5".to_string(),
-        provider_name: "gpt".to_string(),
+        name: "example-reasoning-model".to_string(),
+        provider_name: "secondary".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "gpt-5.5".to_string(),
+        model: "example-reasoning-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -723,7 +723,7 @@ async fn model_invoke_injects_canonical_client_tool_schemas_when_server_omits_to
         .and(path("/v1/chat/completions"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "chatcmpl_2",
-            "model": "stepfun-ai/step-3.7-flash",
+            "model": "example-chat-model",
             "choices": [{
                 "message": {
                     "role": "assistant",
@@ -739,7 +739,7 @@ async fn model_invoke_injects_canonical_client_tool_schemas_when_server_omits_to
         name: "test-openai".to_string(),
         provider_name: "test".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "stepfun-ai/step-3.7-flash".to_string(),
+        model: "example-chat-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -837,7 +837,7 @@ async fn model_invoke_reports_provider_status_and_body_on_error() {
         name: "test-openai".to_string(),
         provider_name: "test".to_string(),
         api_key: "test-api-key".to_string(),
-        model: "stepfun-ai/step-3.7-flash".to_string(),
+        model: "example-chat-model".to_string(),
         base_url: format!("{}/v1", server.uri()),
         protocol: "openai".to_string(),
     });
@@ -858,19 +858,19 @@ async fn model_invoke_reports_provider_status_and_body_on_error() {
 
 
 #[test]
-fn model_config_requires_local_nvidia_api_key() {
+fn model_config_requires_local_model_provider_api_key() {
     let result = ModelConfig::from_env_values(None, None, None);
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("NVIDIA_API_KEY"));
+    assert!(result.unwrap_err().to_string().contains("BRAINX_MODEL_API_KEY"));
 }
 
 #[test]
-fn model_config_uses_stepfun_flash_as_default_model() {
+fn model_config_uses_example_chat_as_default_model() {
     let config = ModelConfig::from_env_values(Some("test-api-key".to_string()), None, None)
         .expect("api key should be enough for default model config");
 
-    assert_eq!(config.model, "stepfun-ai/step-3.7-flash");
+    assert_eq!(config.model, "example-chat-model");
     assert_eq!(config.protocol, "openai");
 }
 
@@ -884,8 +884,8 @@ fn model_config_selects_named_model_from_client_config() {
         client_token: None,
         providers: vec![
             ClientProviderConfig {
-                name: "nvidia".to_string(),
-                base_url: "https://integrate.api.nvidia.com/v1".to_string(),
+                name: "primary".to_string(),
+                base_url: "https://api.primary-model.example/v1".to_string(),
                 api_key: "literal:test-key".to_string(),
                 protocol: "openai".to_string(),
             },

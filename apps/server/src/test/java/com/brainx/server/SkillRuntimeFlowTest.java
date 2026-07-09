@@ -42,12 +42,12 @@ class SkillRuntimeFlowTest {
     syncModelCatalog(daemonId);
 
     JsonNode session = postJson("/api/v1/workspaces/w_core/chat/commands", """
-      {"command":"model","arguments":{"modelName":"gpt:gpt-5.5"}}
+      {"command":"model","arguments":{"modelName":"secondary:example-reasoning-model"}}
       """);
 
-    assertThat(session.get("activeModelName").asText()).isEqualTo("gpt:gpt-5.5");
-    assertThat(session.get("availableModels").toString()).contains("nvidia:stepfun-ai/step-3.7-flash").contains("gpt:gpt-5.5");
-    assertThat(session.get("timelineNotices").get(0).get("message").asText()).isEqualTo("已切换模型：gpt:gpt-5.5");
+    assertThat(session.get("activeModelName").asText()).isEqualTo("secondary:example-reasoning-model");
+    assertThat(session.get("availableModels").toString()).contains("primary:example-chat-model").contains("secondary:example-reasoning-model");
+    assertThat(session.get("timelineNotices").get(0).get("message").asText()).isEqualTo("已切换模型：secondary:example-reasoning-model");
     assertThat(session.get("timelineNotices").get(0).get("afterMessageIndex").asInt()).isEqualTo(0);
   }
 
@@ -56,7 +56,7 @@ class SkillRuntimeFlowTest {
     String daemonId = registerLocalDaemon();
     syncModelCatalog(daemonId);
     postJson("/api/v1/workspaces/w_core/chat/commands", """
-      {"command":"model","arguments":{"modelName":"gpt:gpt-5.5"}}
+      {"command":"model","arguments":{"modelName":"secondary:example-reasoning-model"}}
       """);
 
     postJson("/api/v1/workspaces/w_core/chat/messages", """
@@ -65,7 +65,7 @@ class SkillRuntimeFlowTest {
 
     JsonNode request = onlyPendingRequest(daemonId);
     assertThat(request.get("toolName").asText()).isEqualTo("model.invoke");
-    assertThat(request.get("input").get("modelName").asText()).isEqualTo("gpt:gpt-5.5");
+    assertThat(request.get("input").get("modelName").asText()).isEqualTo("secondary:example-reasoning-model");
   }
 
   @Test
@@ -73,7 +73,7 @@ class SkillRuntimeFlowTest {
     String daemonId = registerLocalDaemon();
     syncModelCatalog(daemonId);
     postJson("/api/v1/workspaces/w_core/chat/commands", """
-      {"command":"model","arguments":{"modelName":"gpt:gpt-5.5"}}
+      {"command":"model","arguments":{"modelName":"secondary:example-reasoning-model"}}
       """);
     postJson("/api/v1/workspaces/w_core/chat/commands", """
       {"command":"workspace","arguments":{"path":"/tmp/brainx-demo"}}
@@ -85,7 +85,7 @@ class SkillRuntimeFlowTest {
 
     JsonNode request = onlyPendingRequest(daemonId);
     assertThat(request.get("input").get("messages").toString()).doesNotContain("已切换模型").doesNotContain("已切换工作目录");
-    assertThat(request.get("input").get("modelName").asText()).isEqualTo("gpt:gpt-5.5");
+    assertThat(request.get("input").get("modelName").asText()).isEqualTo("secondary:example-reasoning-model");
     assertThat(request.get("input").get("currentWorkspace").asText()).isEqualTo("/tmp/brainx-demo");
   }
 
@@ -97,7 +97,7 @@ class SkillRuntimeFlowTest {
     mvc.perform(post("/api/v1/workspaces/w_core/chat/commands")
         .contentType(MediaType.APPLICATION_JSON)
         .content("""
-      {"command":"model","arguments":{"modelName":"other:gpt-5.5"}}
+      {"command":"model","arguments":{"modelName":"other:example-reasoning-model"}}
       """))
       .andExpect(status().isBadRequest());
   }
@@ -108,13 +108,13 @@ class SkillRuntimeFlowTest {
     putJson("/api/v1/client-daemons/" + daemonId + "/models", """
       {
         "models":[
-          {"key":"nvidia:01-ai/yi-large","providerName":"nvidia","model":"01-ai/yi-large","protocol":"openai","contextWindow":128000},
-          {"key":"nvidia:stepfun-ai/step-3.7-flash","providerName":"nvidia","model":"stepfun-ai/step-3.7-flash","protocol":"openai","contextWindow":128000},
-          {"key":"gpt:gpt-5.5","providerName":"gpt","model":"gpt-5.5","protocol":"openai","contextWindow":128000}
+          {"key":"primary:01-ai/yi-large","providerName":"primary","model":"01-ai/yi-large","protocol":"openai","contextWindow":128000},
+          {"key":"primary:example-chat-model","providerName":"primary","model":"example-chat-model","protocol":"openai","contextWindow":128000},
+          {"key":"secondary:example-reasoning-model","providerName":"secondary","model":"example-reasoning-model","protocol":"openai","contextWindow":128000}
         ],
         "providers":[
-          {"name":"nvidia","status":"ok"},
-          {"name":"gpt","status":"ok"}
+          {"name":"primary","status":"ok"},
+          {"name":"secondary","status":"ok"}
         ]
       }
       """);
@@ -123,7 +123,7 @@ class SkillRuntimeFlowTest {
       {"clientDaemonId":"%s"}
       """.formatted(daemonId));
 
-    assertThat(session.get("activeModelName").asText()).isEqualTo("nvidia:stepfun-ai/step-3.7-flash");
+    assertThat(session.get("activeModelName").asText()).isEqualTo("primary:example-chat-model");
   }
 
   @Test
@@ -132,18 +132,18 @@ class SkillRuntimeFlowTest {
     putJson("/api/v1/client-daemons/" + daemonId + "/models", """
       {
         "models":[
-          {"key":"nvidia:stepfun-ai/step-3.7-flash","providerName":"nvidia","model":"stepfun-ai/step-3.7-flash","protocol":"openai","contextWindow":256000},
-          {"key":"gpt:gpt-5.5","providerName":"gpt","model":"gpt-5.5","protocol":"openai","contextWindow":1050000}
+          {"key":"primary:example-chat-model","providerName":"primary","model":"example-chat-model","protocol":"openai","contextWindow":256000},
+          {"key":"secondary:example-reasoning-model","providerName":"secondary","model":"example-reasoning-model","protocol":"openai","contextWindow":1050000}
         ],
         "providers":[
-          {"name":"nvidia","status":"ok"},
-          {"name":"gpt","status":"ok"}
+          {"name":"primary","status":"ok"},
+          {"name":"secondary","status":"ok"}
         ]
       }
       """);
 
     JsonNode session = postJson("/api/v1/workspaces/w_core/chat/commands", """
-      {"command":"model","arguments":{"modelName":"gpt:gpt-5.5"}}
+      {"command":"model","arguments":{"modelName":"secondary:example-reasoning-model"}}
       """);
 
     JsonNode budget = session.get("contextBudget");
@@ -158,18 +158,18 @@ class SkillRuntimeFlowTest {
     putJson("/api/v1/client-daemons/" + daemonId + "/models", """
       {
         "models":[
-          {"key":"nvidia:stepfun-ai/step-3.7-flash","providerName":"nvidia","model":"stepfun-ai/step-3.7-flash","protocol":"openai"},
-          {"key":"gpt:gpt-5.5","providerName":"gpt","model":"gpt-5.5","protocol":"openai"}
+          {"key":"primary:example-chat-model","providerName":"primary","model":"example-chat-model","protocol":"openai"},
+          {"key":"secondary:example-reasoning-model","providerName":"secondary","model":"example-reasoning-model","protocol":"openai"}
         ],
         "providers":[
-          {"name":"nvidia","status":"ok"},
-          {"name":"gpt","status":"ok"}
+          {"name":"primary","status":"ok"},
+          {"name":"secondary","status":"ok"}
         ]
       }
       """);
 
     JsonNode session = postJson("/api/v1/workspaces/w_core/chat/commands", """
-      {"command":"model","arguments":{"modelName":"gpt:gpt-5.5"}}
+      {"command":"model","arguments":{"modelName":"secondary:example-reasoning-model"}}
       """);
 
     JsonNode budget = session.get("contextBudget");
@@ -392,12 +392,12 @@ class SkillRuntimeFlowTest {
     putJson("/api/v1/client-daemons/" + daemonId + "/models", """
       {
         "models":[
-          {"key":"nvidia:stepfun-ai/step-3.7-flash","providerName":"nvidia","model":"stepfun-ai/step-3.7-flash","protocol":"openai","contextWindow":128000},
-          {"key":"gpt:gpt-5.5","providerName":"gpt","model":"gpt-5.5","protocol":"openai","contextWindow":128000}
+          {"key":"primary:example-chat-model","providerName":"primary","model":"example-chat-model","protocol":"openai","contextWindow":128000},
+          {"key":"secondary:example-reasoning-model","providerName":"secondary","model":"example-reasoning-model","protocol":"openai","contextWindow":128000}
         ],
         "providers":[
-          {"name":"nvidia","status":"ok"},
-          {"name":"gpt","status":"ok"}
+          {"name":"primary","status":"ok"},
+          {"name":"secondary","status":"ok"}
         ]
       }
       """);

@@ -50,9 +50,9 @@ fn start_command_args_use_saved_config_and_hidden_foreground_mode() {
         daemon_id: Some("cd_1".to_string()),
         client_token: Some("bc_test".to_string()),
         providers: vec![ClientProviderConfig {
-            name: "nvidia".to_string(),
-            base_url: "https://integrate.api.nvidia.com/v1".to_string(),
-            api_key: "env:NVIDIA_API_KEY".to_string(),
+            name: "primary".to_string(),
+            base_url: "https://api.primary-model.example/v1".to_string(),
+            api_key: "env:BRAINX_MODEL_API_KEY".to_string(),
             protocol: "openai".to_string(),
         }],
         web_search: None,

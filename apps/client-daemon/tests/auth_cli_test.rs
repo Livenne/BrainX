@@ -25,14 +25,14 @@ fn client_config_has_providers_without_workspace_list_or_login_identity() {
     assert_eq!(config.daemon_id, None);
     assert_eq!(config.client_token, None);
     assert_eq!(config.providers.len(), 2);
-    let nvidia = config.provider_config("nvidia").unwrap();
-    assert_eq!(nvidia.base_url, "https://integrate.api.nvidia.com/v1");
-    assert_eq!(nvidia.api_key, "env:NVIDIA_API_KEY");
-    assert_eq!(nvidia.protocol, "openai");
-    let gpt_provider = config.provider_config("gpt").unwrap();
-    assert_eq!(gpt_provider.base_url, "https://api.shangan9.cc.cd/v1");
-    assert_eq!(gpt_provider.api_key, "env:SHANGAN_API_KEY");
-    assert_eq!(gpt_provider.protocol, "openai");
+    let primary = config.provider_config("primary").unwrap();
+    assert_eq!(primary.base_url, "https://api.primary-model.example/v1");
+    assert_eq!(primary.api_key, "env:BRAINX_MODEL_API_KEY");
+    assert_eq!(primary.protocol, "openai");
+    let secondary = config.provider_config("secondary").unwrap();
+    assert_eq!(secondary.base_url, "https://api.secondary-model.example/v1");
+    assert_eq!(secondary.api_key, "env:BRAINX_SECONDARY_MODEL_API_KEY");
+    assert_eq!(secondary.protocol, "openai");
     let serialized = serde_json::to_value(&config).unwrap();
     assert!(serialized.get("workspaces").is_none());
     assert!(serialized.get("models").is_none());
@@ -52,7 +52,7 @@ fn resolve_device_name_treats_local_dev_as_placeholder() {
 fn client_config_rejects_duplicate_provider_names() {
     let mut config = ClientConfig::new("http://localhost:8080", "devbox");
 
-    let result = config.add_provider(provider("nvidia"));
+    let result = config.add_provider(provider("primary"));
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("provider name already exists"));
@@ -77,18 +77,18 @@ fn client_config_migrates_legacy_models_to_unique_providers() {
       "serverUrl":"http://localhost:8080",
       "deviceName":"devbox",
       "installationId":"install-test",
-      "activeModel":"nvidia-step",
+      "activeModel":"example-chat",
       "models":[
-        {"name":"nvidia-step","model":"stepfun-ai/step-3.7-flash","baseUrl":"https://integrate.api.nvidia.com/v1","apiKey":"env:NVIDIA_API_KEY","protocol":"openai","contextWindow":128000},
-        {"name":"gpt-5.5","model":"gpt-5.5","baseUrl":"https://api.shangan9.cc.cd/v1","apiKey":"env:SHANGAN_API_KEY","protocol":"openai"}
+        {"name":"example-chat","model":"example-chat-model","baseUrl":"https://api.primary-model.example/v1","apiKey":"env:BRAINX_MODEL_API_KEY","protocol":"openai","contextWindow":128000},
+        {"name":"example-reasoning-model","model":"example-reasoning-model","baseUrl":"https://api.secondary-model.example/v1","apiKey":"env:BRAINX_SECONDARY_MODEL_API_KEY","protocol":"openai"}
       ]
     }"#;
 
     let config: ClientConfig = serde_json::from_str(legacy).unwrap();
 
     assert_eq!(config.providers.len(), 2);
-    assert!(config.provider_config("nvidia-step").is_ok());
-    assert!(config.provider_config("gpt-5.5").is_ok());
+    assert!(config.provider_config("example-chat").is_ok());
+    assert!(config.provider_config("example-reasoning-model").is_ok());
 }
 
 #[tokio::test]
@@ -139,8 +139,8 @@ async fn unbind_posts_without_user_auth_and_requires_confirmation() {
 fn provider(name: &str) -> ClientProviderConfig {
     ClientProviderConfig {
         name: name.to_string(),
-        base_url: "https://integrate.api.nvidia.com/v1".to_string(),
-        api_key: "env:NVIDIA_API_KEY".to_string(),
+        base_url: "https://api.primary-model.example/v1".to_string(),
+        api_key: "env:BRAINX_MODEL_API_KEY".to_string(),
         protocol: "openai".to_string(),
     }
 }
