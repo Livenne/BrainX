@@ -1,6 +1,9 @@
+use brainx_client_daemon::auth::WebSearchConfig;
 use brainx_client_daemon::tools::{SearchMode, WorkspaceTools};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn assert_error_contains<T: std::fmt::Debug>(result: anyhow::Result<T>, expected: &str) {
     assert!(result.is_err(), "expected error containing {expected}");
@@ -65,7 +68,7 @@ fn get_environment_reports_runtime_without_provider_details() {
     assert!(result["dateTime"]["iso"].as_str().unwrap_or_default().contains('T'));
     assert!(result["dateTime"]["timezone"].as_str().unwrap_or_default().len() > 1);
     assert!(result["dateTime"]["utcOffset"].as_str().unwrap_or_default().starts_with(['+', '-']));
-    assert_eq!(result["model"]["name"], "nvidia-step");
+    assert_eq!(result["model"]["name"], "nvidia:stepfun-ai/step-3.7-flash");
     assert_eq!(result["model"]["model"], "stepfun-ai/step-3.7-flash");
     assert!(result["model"].get("provider").is_none());
     assert!(result["model"].get("baseUrl").is_none());
@@ -74,11 +77,11 @@ fn get_environment_reports_runtime_without_provider_details() {
 #[test]
 fn get_environment_reports_selected_request_model() {
     let workspace = tempfile::tempdir().unwrap();
-    let tools = WorkspaceTools::new(workspace.path()).with_active_model_info("gpt-5.5", "gpt-5.5");
+    let tools = WorkspaceTools::new(workspace.path()).with_active_model_info("gpt:gpt-5.5", "gpt-5.5");
 
     let result = tools.execute("get_env", &json!({})).expect("environment should load");
 
-    assert_eq!(result["model"]["name"], "gpt-5.5");
+    assert_eq!(result["model"]["name"], "gpt:gpt-5.5");
     assert_eq!(result["model"]["model"], "gpt-5.5");
 }
 
@@ -104,6 +107,7 @@ fn skill_inventory_scans_project_and_global_skill_markdown() {
 
     let inventory = tools.skill_inventory().expect("skills should scan");
 
+    assert_eq!(inventory["projectRoot"], workspace.path().display().to_string());
     assert_eq!(inventory["project"][0]["name"], "debug-rust");
     assert_eq!(inventory["project"][0]["description"], "Debug Rust test failures");
     assert_eq!(inventory["project"][0]["path"], project_skill.display().to_string());
@@ -186,27 +190,92 @@ fn execute_rejects_old_get_environment_tool_name() {
     assert_error_contains(result, "unsupported tool");
 }
 
-#[test]
-fn execute_web_search_returns_mock_result_without_network() {
+#[tokio::test]
+async fn execute_web_search_posts_tavily_request_and_normalizes_results() {
+    let tavily = MockServer::start().await;
+    let workspace = tempfile::tempdir().unwrap();
+    let tools = WorkspaceTools::new(workspace.path()).with_web_search_config(Some(WebSearchConfig {
+        provider: "tavily".to_string(),
+        base_url: tavily.uri(),
+        api_key: "literal:tavily-test-key".to_string(),
+        timeout_seconds: 20,
+    }));
+    let long_content = "x".repeat(40_000);
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(|request: &wiremock::Request| {
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer tavily-test-key")
+        })
+        .and(|request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            body["query"] == "agent toolcall rendering"
+                && body["search_depth"] == "advanced"
+                && body["topic"] == "news"
+                && body["max_results"] == 3
+                && body["days"] == 7
+                && body["include_answer"] == true
+                && body["include_raw_content"] == false
+                && body["include_domains"] == json!(["openai.com"])
+                && body["exclude_domains"] == json!(["example.com"])
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "query": "agent toolcall rendering",
+            "answer": "Use concise tool frames.",
+            "request_id": "tvly_req_1",
+            "response_time": 1.25,
+            "results": [{
+                "title": "Agent tool rendering",
+                "url": "https://openai.com/example",
+                "content": long_content,
+                "score": 0.93
+            }]
+        })))
+        .expect(1)
+        .mount(&tavily)
+        .await;
+
+    let result = tools
+        .execute_async(
+            "web_search",
+            &json!({
+                "query": "agent toolcall rendering",
+                "searchDepth": "advanced",
+                "topic": "news",
+                "maxResults": 3,
+                "days": 7,
+                "includeDomains": ["openai.com"],
+                "excludeDomains": ["example.com"],
+                "includeAnswer": true,
+                "includeRawContent": false
+            }),
+        )
+        .await
+        .expect("web_search should call Tavily");
+
+    assert_eq!(result["query"], "agent toolcall rendering");
+    assert_eq!(result["answer"], "Use concise tool frames.");
+    assert_eq!(result["requestId"], "tvly_req_1");
+    assert_eq!(result["responseTime"], 1.25);
+    assert_eq!(result["results"][0]["title"], "Agent tool rendering");
+    assert_eq!(result["results"][0]["url"], "https://openai.com/example");
+    assert!(result["results"][0]["content"].as_str().unwrap().len() < 40_000);
+    assert_eq!(result["truncated"], true);
+}
+
+#[tokio::test]
+async fn execute_web_search_requires_local_tavily_config() {
     let workspace = tempfile::tempdir().unwrap();
     let tools = WorkspaceTools::new(workspace.path());
 
     let result = tools
-        .execute(
-            "web_search",
-            &json!({
-                "query": "agent toolcall rendering",
-                "domains": ["openai.com"],
-                "recencyDays": 30,
-                "maxResults": 3
-            }),
-        )
-        .expect("web_search mock should succeed");
+        .execute_async("web_search", &json!({"query": "brainx"}))
+        .await;
 
-    assert_eq!(result["mock"], true);
-    assert_eq!(result["query"], "agent toolcall rendering");
-    assert!(result["results"].as_array().expect("results").len() >= 1);
-    assert!(result["results"][0]["title"].as_str().unwrap_or_default().contains("Mock"));
+    assert_error_contains(result, "web_search is not configured");
 }
 
 #[test]

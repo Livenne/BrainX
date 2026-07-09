@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB: brainx
-      POSTGRES_USER: brainx
-      POSTGRES_PASSWORD: brainx
+      POSTGRES_DB: ${POSTGRES_DB:-brainx}
+      POSTGRES_USER: ${POSTGRES_USER:-brainx}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-replace-with-local-password}
     ports:
       - "5432:5432"
     volumes:

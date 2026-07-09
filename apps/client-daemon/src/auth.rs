@@ -2,32 +2,108 @@ use crate::protocol::{BindCodeResponse, UnbindDaemonRequest};
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CAPABILITIES: &[&str] = &["model.invoke", "agent.loop"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct ClientModelConfig {
+pub struct ClientProviderConfig {
     pub name: String,
-    pub model: String,
     pub base_url: String,
     pub api_key: String,
     pub protocol: String,
-    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct WebSearchConfig {
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
+    #[serde(default = "default_web_search_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LegacyClientModelConfig {
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub protocol: String,
+    #[allow(dead_code)]
+    pub model: String,
+    #[allow(dead_code)]
+    pub context_window: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ClientConfig {
     pub server_url: String,
     pub device_name: String,
+    #[serde(default = "new_installation_id")]
+    pub installation_id: String,
     pub daemon_id: Option<String>,
-    #[serde(default = "default_active_model")]
-    pub active_model: String,
-    #[serde(default = "default_models")]
-    pub models: Vec<ClientModelConfig>,
+    #[serde(default)]
+    pub client_token: Option<String>,
+    #[serde(default = "default_providers")]
+    pub providers: Vec<ClientProviderConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<WebSearchConfig>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub model_context_windows: HashMap<String, u32>,
+}
+
+impl<'de> Deserialize<'de> for ClientConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RawClientConfig {
+            server_url: String,
+            device_name: String,
+            #[serde(default = "new_installation_id")]
+            installation_id: String,
+            daemon_id: Option<String>,
+            #[serde(default)]
+            client_token: Option<String>,
+            #[serde(default)]
+            providers: Vec<ClientProviderConfig>,
+            #[serde(default)]
+            models: Vec<LegacyClientModelConfig>,
+            #[serde(default)]
+            web_search: Option<WebSearchConfig>,
+            #[serde(default)]
+            model_context_windows: HashMap<String, u32>,
+        }
+
+        let raw = RawClientConfig::deserialize(deserializer)?;
+        let providers = if raw.providers.is_empty() && !raw.models.is_empty() {
+            legacy_models_to_providers(raw.models)
+        } else if raw.providers.is_empty() {
+            default_providers()
+        } else {
+            raw.providers
+        };
+        Ok(Self {
+            server_url: raw.server_url,
+            device_name: raw.device_name,
+            installation_id: raw.installation_id,
+            daemon_id: raw.daemon_id,
+            client_token: raw.client_token,
+            providers,
+            web_search: raw.web_search,
+            model_context_windows: raw.model_context_windows,
+        })
+    }
 }
 
 impl ClientConfig {
@@ -35,9 +111,12 @@ impl ClientConfig {
         Self {
             server_url: server_url.into(),
             device_name: device_name.into(),
+            installation_id: new_installation_id(),
             daemon_id: None,
-            active_model: default_active_model(),
-            models: default_models(),
+            client_token: None,
+            providers: default_providers(),
+            web_search: None,
+            model_context_windows: HashMap::new(),
         }
     }
 
@@ -48,82 +127,105 @@ impl ClientConfig {
             .ok_or_else(|| anyhow!("brainx start is required before this command"))
     }
 
-    pub fn active_model_config(&self) -> Result<&ClientModelConfig> {
-        self.model_config(Some(&self.active_model))
+    pub fn require_client_token(&self) -> Result<&str> {
+        self.client_token
+            .as_deref()
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| anyhow!("brainx start is required before this command"))
     }
 
-    pub fn model_config(&self, name: Option<&str>) -> Result<&ClientModelConfig> {
-        let selected = name.filter(|value| !value.trim().is_empty()).unwrap_or(&self.active_model);
-        self.models
-            .iter()
-            .find(|model| model.name == selected)
-            .ok_or_else(|| anyhow!("model '{selected}' is not configured"))
-    }
-
-    pub fn add_model(&mut self, model: ClientModelConfig) -> Result<()> {
-        validate_model(&model)?;
-        if self.models.iter().any(|existing| existing.name == model.name) {
-            return Err(anyhow!("model name already exists: {}", model.name));
+    pub fn provider_config(&self, name: &str) -> Result<&ClientProviderConfig> {
+        let selected = name.trim();
+        if selected.is_empty() {
+            return Err(anyhow!("provider name is required"));
         }
-        self.models.push(model);
+        self.providers
+            .iter()
+            .find(|provider| provider.name == selected)
+            .ok_or_else(|| anyhow!("provider '{selected}' is not configured"))
+    }
+
+    pub fn add_provider(&mut self, provider: ClientProviderConfig) -> Result<()> {
+        validate_provider(&provider)?;
+        if self.providers.iter().any(|existing| existing.name == provider.name) {
+            return Err(anyhow!("provider name already exists: {}", provider.name));
+        }
+        self.providers.push(provider);
         Ok(())
     }
 
-    pub fn remove_model(&mut self, name: &str) -> Result<()> {
-        if name == self.active_model {
-            return Err(anyhow!("cannot remove active model: {name}"));
-        }
-        let before = self.models.len();
-        self.models.retain(|model| model.name != name);
-        if self.models.len() == before {
-            return Err(anyhow!("model not found: {name}"));
+    pub fn remove_provider(&mut self, name: &str) -> Result<()> {
+        let before = self.providers.len();
+        self.providers.retain(|provider| provider.name != name);
+        if self.providers.len() == before {
+            return Err(anyhow!("provider not found: {name}"));
         }
         Ok(())
     }
 }
 
-fn validate_model(model: &ClientModelConfig) -> Result<()> {
-    if model.name.trim().is_empty() {
-        return Err(anyhow!("model name is required"));
+fn default_web_search_timeout_seconds() -> u64 {
+    20
+}
+
+fn validate_provider(provider: &ClientProviderConfig) -> Result<()> {
+    if provider.name.trim().is_empty() {
+        return Err(anyhow!("provider name is required"));
     }
-    if model.model.trim().is_empty() {
-        return Err(anyhow!("model id is required"));
+    if provider.name.contains(':') {
+        return Err(anyhow!("provider name must not contain ':'"));
     }
-    if model.base_url.trim().is_empty() {
-        return Err(anyhow!("model baseUrl is required"));
+    if provider.base_url.trim().is_empty() {
+        return Err(anyhow!("provider baseUrl is required"));
     }
-    if model.api_key.trim().is_empty() {
-        return Err(anyhow!("model apiKey is required"));
+    if provider.api_key.trim().is_empty() {
+        return Err(anyhow!("provider apiKey is required"));
     }
-    if !matches!(model.protocol.as_str(), "openai" | "anthropic") {
-        return Err(anyhow!("model protocol must be openai or anthropic"));
+    if !matches!(provider.protocol.as_str(), "openai" | "anthropic") {
+        return Err(anyhow!("provider protocol must be openai or anthropic"));
     }
     Ok(())
 }
 
-fn default_active_model() -> String {
-    "nvidia-step".to_string()
+fn new_installation_id() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("install-{timestamp}-{}", std::process::id())
 }
 
-fn default_models() -> Vec<ClientModelConfig> {
+fn default_providers() -> Vec<ClientProviderConfig> {
     vec![
-        ClientModelConfig {
-            name: default_active_model(),
-            model: "stepfun-ai/step-3.7-flash".to_string(),
+        ClientProviderConfig {
+            name: "nvidia".to_string(),
             base_url: "https://integrate.api.nvidia.com/v1".to_string(),
             api_key: "env:NVIDIA_API_KEY".to_string(),
             protocol: "openai".to_string(),
-            context_window: Some(128000),
         },
-        ClientModelConfig {
-            name: "gpt-5.5".to_string(),
-            model: "gpt-5.5".to_string(),
+        ClientProviderConfig {
+            name: "gpt".to_string(),
             base_url: "https://api.shangan9.cc.cd/v1".to_string(),
             api_key: "env:SHANGAN_API_KEY".to_string(),
             protocol: "openai".to_string(),
-            context_window: None,
         },
     ]
+}
+
+fn legacy_models_to_providers(models: Vec<LegacyClientModelConfig>) -> Vec<ClientProviderConfig> {
+    let mut providers = Vec::new();
+    for model in models {
+        if providers.iter().any(|provider: &ClientProviderConfig| provider.name == model.name) {
+            continue;
+        }
+        providers.push(ClientProviderConfig {
+            name: model.name,
+            base_url: model.base_url,
+            api_key: model.api_key,
+            protocol: model.protocol,
+        });
+    }
+    providers
 }
 
 pub fn default_workspace_path() -> Result<PathBuf> {
@@ -149,11 +251,58 @@ pub fn load_config(path: PathBuf) -> Result<ClientConfig> {
 
 pub fn load_or_create_config(path: PathBuf, server_url: &str, device_name: &str) -> Result<ClientConfig> {
     if path.exists() {
-        return load_config(path);
+        let mut config = load_config(path.clone())?;
+        if config.device_name.trim().is_empty() || config.device_name == "local-dev" {
+            config.device_name = device_name.to_string();
+            save_config(path, &config)?;
+        }
+        return Ok(config);
     }
     let config = ClientConfig::new(server_url, device_name);
     save_config(path, &config)?;
     Ok(config)
+}
+
+pub fn default_device_name() -> String {
+    hostname_from_command()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "brainx-client".to_string())
+}
+
+pub fn resolve_device_name(device_name: Option<String>) -> String {
+    device_name
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !is_placeholder_device_name(value))
+        .unwrap_or_else(default_device_name)
+}
+
+pub fn resolve_secret_value(value: &str, usage: &str) -> Result<String> {
+    if let Some(name) = value.strip_prefix("env:") {
+        return std::env::var(name).with_context(|| format!("{name} is required for {usage}"));
+    }
+    if let Some(literal) = value.strip_prefix("literal:") {
+        return Ok(literal.to_string());
+    }
+    if value.trim().is_empty() {
+        return Err(anyhow!("{usage} secret must not be empty"));
+    }
+    Ok(value.to_string())
+}
+
+fn is_placeholder_device_name(device_name: &str) -> bool {
+    device_name.eq_ignore_ascii_case("local-dev")
+}
+
+fn hostname_from_command() -> Option<String> {
+    let output = Command::new("hostname").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!hostname.is_empty()).then_some(hostname)
 }
 
 pub fn save_config(path: PathBuf, config: &ClientConfig) -> Result<()> {
@@ -192,12 +341,14 @@ pub async fn unbind(config: &ClientConfig, confirm: bool) -> Result<()> {
     }
     let client = Client::new();
     let daemon_id = config.require_daemon_id()?;
+    let client_token = config.require_client_token()?;
     let url = format!(
         "{}/api/v1/client-daemons/{daemon_id}/unbind",
         config.server_url.trim_end_matches('/')
     );
     client
         .post(url)
+        .bearer_auth(client_token)
         .json(&UnbindDaemonRequest { confirm })
         .send()
         .await

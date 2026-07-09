@@ -1,4 +1,4 @@
-use brainx_client_daemon::auth::{ClientConfig, ClientModelConfig};
+use brainx_client_daemon::auth::{ClientConfig, ClientProviderConfig};
 use brainx_client_daemon::lifecycle::{
     build_start_command_args, clear_stale_pidfile, daemon_status, ensure_daemon_stopped, DaemonStatus,
 };
@@ -46,16 +46,17 @@ fn start_command_args_use_saved_config_and_hidden_foreground_mode() {
     let config = ClientConfig {
         server_url: "http://localhost:8080".to_string(),
         device_name: "devbox".to_string(),
+        installation_id: "install-test".to_string(),
         daemon_id: Some("cd_1".to_string()),
-        active_model: "nvidia-step".to_string(),
-        models: vec![ClientModelConfig {
-            name: "nvidia-step".to_string(),
-            model: "stepfun-ai/step-3.7-flash".to_string(),
+        client_token: Some("bc_test".to_string()),
+        providers: vec![ClientProviderConfig {
+            name: "nvidia".to_string(),
             base_url: "https://integrate.api.nvidia.com/v1".to_string(),
             api_key: "env:NVIDIA_API_KEY".to_string(),
             protocol: "openai".to_string(),
-            context_window: Some(128000),
         }],
+        web_search: None,
+        model_context_windows: Default::default(),
     };
 
     let args = build_start_command_args(&config, &config_path, 750).unwrap();

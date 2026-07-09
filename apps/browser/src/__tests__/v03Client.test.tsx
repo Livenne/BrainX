@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -35,22 +35,17 @@ describe('v0.3 Client management', () => {
     expect(screen.getAllByText(/Primary local development client/).length).toBeGreaterThan(0);
   });
 
-  it('supports mock add, note edit, and delete actions', async () => {
+  it('shows bind-code entry and supports unbinding a listed mock client', async () => {
     const user = userEvent.setup();
     renderAt('/workspaces/w_core/client-daemons');
 
-    await user.click(await screen.findByRole('button', { name: 'Add client' }));
-    expect(await screen.findByText('New Client Device')).toBeInTheDocument();
+    expect(await screen.findByText('Bind local client')).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Bind code' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Bind client' })).toBeInTheDocument();
 
     const localDevice = screen.getByRole('article', { name: 'Livenne Workstation' });
-    await user.clear(within(localDevice).getByRole('textbox', { name: 'Device note' }));
-    await user.type(within(localDevice).getByRole('textbox', { name: 'Device note' }), 'Allowed for browser tests');
-    await user.click(within(localDevice).getByRole('button', { name: 'Save note' }));
-    expect(await within(localDevice).findByText('Allowed for browser tests')).toBeInTheDocument();
-    await waitFor(() => expect(within(localDevice).getByRole('button', { name: 'Save note' })).not.toHaveAttribute('aria-busy'));
+    await user.click(within(localDevice).getByRole('button', { name: 'Delete client' }));
 
-    const newDevice = screen.getByRole('article', { name: 'New Client Device' });
-    await user.click(within(newDevice).getByRole('button', { name: 'Delete client' }));
-    expect(screen.queryByText('New Client Device')).not.toBeInTheDocument();
+    expect(screen.queryByRole('article', { name: 'Livenne Workstation' })).not.toBeInTheDocument();
   });
 });

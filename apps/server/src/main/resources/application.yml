@@ -10,3 +10,7 @@ management:
 
 server:
   port: 8080
+
+brainx:
+  state:
+    sqlite-path: ${BRAINX_SERVER_DB:~/.brainx/server/brainx.sqlite}

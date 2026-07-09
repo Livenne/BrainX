@@ -6,6 +6,7 @@ import java.util.Map;
 public record ExecutionRequestRecord(
     String executionId,
     String workspaceId,
+    String clientDaemonId,
     String agentId,
     String branchId,
     String runId,
@@ -27,6 +28,7 @@ public record ExecutionRequestRecord(
     return new ExecutionRequestRecord(
         executionId,
         workspaceId,
+        "",
         agentId,
         branchId,
         runId,
@@ -97,6 +99,7 @@ public record ExecutionRequestRecord(
     return new ExecutionRequestRecord(
         executionId,
         workspaceId,
+        "",
         agentId,
         branchId,
         runId,
@@ -135,6 +138,7 @@ public record ExecutionRequestRecord(
     return new ExecutionRequestRecord(
         executionId,
         workspaceId,
+        "",
         agentId,
         branchId,
         runId,
@@ -155,6 +159,24 @@ public record ExecutionRequestRecord(
     return new ExecutionRequestRecord(
         executionId,
         workspaceId,
+        clientDaemonId,
+        agentId,
+        branchId,
+        runId,
+        status,
+        capabilityId,
+        toolName,
+        input,
+        riskTier,
+        idempotencyKey
+    );
+  }
+
+  public ExecutionRequestRecord assignedTo(String nextClientDaemonId) {
+    return new ExecutionRequestRecord(
+        executionId,
+        workspaceId,
+        nextClientDaemonId == null ? "" : nextClientDaemonId,
         agentId,
         branchId,
         runId,

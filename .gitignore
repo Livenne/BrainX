@@ -17,6 +17,18 @@ target/
 .env.*
 !.env.example
 
+# Local brainx state and personal agent working files
+.agent/
+.agents/
+.superpowers/
+p/
+tool-test-output/
+test.txt
+test_file.txt
+*.Zone.Identifier
+*:Zone.Identifier
+*.pdf
+
 # Logs and editor state
 *.log
 logs/

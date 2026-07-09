@@ -15,6 +15,7 @@ vi.mock('../services/mockApi', () => ({
   createChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
   forkChatSession: vi.fn(),
+  getClientDaemons: vi.fn().mockResolvedValue([{ id: 'cd_local', deviceName: 'Livenne Workstation', status: 'online' }]),
   getSkillInventory: vi.fn().mockResolvedValue({ project: [], global: [] }),
   getChatSessions: vi.fn(),
   renameChatSession: vi.fn(),
@@ -25,12 +26,23 @@ vi.mock('../services/mockApi', () => ({
 vi.mock('../services/brainxApi', () => ({
   answerAskUser: vi.fn(),
   approveToolRequest: vi.fn(),
+  cancelChatSession: vi.fn(),
+  createChatSession: vi.fn(),
+  deleteChatSession: vi.fn(),
+  forkChatSession: vi.fn(),
+  getClientDaemons: vi.fn(),
   getChatSession: vi.fn(),
+  getChatSessionById: vi.fn(),
+  getChatSessions: vi.fn(),
   getSkillInventory: vi.fn().mockResolvedValue({ project: [], global: [] }),
   pollChatSession: vi.fn(),
   rejectToolRequest: vi.fn(),
+  renameChatSession: vi.fn(),
   sendChatCommand: vi.fn(),
-  sendChatMessage: vi.fn()
+  sendSessionChatCommand: vi.fn(),
+  sendSessionChatMessage: vi.fn(),
+  sendChatMessage: vi.fn(),
+  subscribeChatEvents: vi.fn()
 }));
 
 const askUserSession: ChatSession = {

@@ -113,7 +113,7 @@ export const resources = {
       },
       agents: {
         title: 'Agents',
-        subtitle: '管理 agent、最近运行、能力边界和启动入口。',
+        subtitle: 'Agent 编排、多 Agent 协作和分支工作流将作为后续版本推进。',
         agentList: 'Agent 列表',
         launchQueue: '启动队列',
         recentRun: '最近运行',
@@ -126,7 +126,15 @@ export const resources = {
         runQueued: '{{agent}} 的运行已加入队列',
         branchForked: '已从 {{agent}} 准备分支 fork',
         frontendSummary: '负责 B 端界面、交互和设计系统落地。',
-        reviewSummary: '负责 skill 草案审查和发布风险归纳。'
+        reviewSummary: '负责 skill 草案审查和发布风险归纳。',
+        roadmapTitle: '后续规划',
+        roadmapHeading: 'Agent 管理功能暂未开放',
+        roadmapBody:
+          '当前第一版聚焦 Chat、Client 绑定、工具调用、模型配置和 Skill 审核。独立 Agent 列表、Agent 模板、多 Agent 编排和分支采纳会在核心链路稳定后继续设计。',
+        currentFocus: '当前可用能力',
+        focusChat: 'Chat 会话和工具调用',
+        focusSkills: 'Skill 审核与发布',
+        focusBranches: '分支工作流暂时搁置'
       },
       chat: {
         title: 'Chat',
@@ -344,7 +352,7 @@ export const resources = {
       },
       agents: {
         title: 'Agents',
-        subtitle: 'Manage agents, recent runs, capability boundaries, and launch entry points.',
+        subtitle: 'Agent orchestration, multi-agent collaboration, and branch workflows are planned for later versions.',
         agentList: 'Agent list',
         launchQueue: 'Launch queue',
         recentRun: 'Recent run',
@@ -357,7 +365,15 @@ export const resources = {
         runQueued: 'Run queued for {{agent}}',
         branchForked: 'Branch fork prepared from {{agent}}',
         frontendSummary: 'Owns B-side UI, interaction, and design-system delivery.',
-        reviewSummary: 'Owns skill draft review and publish risk summaries.'
+        reviewSummary: 'Owns skill draft review and publish risk summaries.',
+        roadmapTitle: 'Roadmap',
+        roadmapHeading: 'Agent management is not open yet',
+        roadmapBody:
+          'The first public build focuses on Chat, Client binding, tool execution, model configuration, and Skill review. Standalone agent lists, templates, orchestration, and branch adoption will be designed after the core loop is stable.',
+        currentFocus: 'Current available capabilities',
+        focusChat: 'Chat sessions and tool calls',
+        focusSkills: 'Skill review and publishing',
+        focusBranches: 'Branch workflows are paused'
       },
       chat: {
         title: 'Chat',

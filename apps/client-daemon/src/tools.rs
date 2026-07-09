@@ -1,5 +1,7 @@
+use crate::auth::{resolve_secret_value, WebSearchConfig};
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -12,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 const DEFAULT_MODEL: &str = "stepfun-ai/step-3.7-flash";
-const DEFAULT_MODEL_NAME: &str = "nvidia-step";
+const DEFAULT_MODEL_NAME: &str = "nvidia:stepfun-ai/step-3.7-flash";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const MAX_TIMEOUT_SECONDS: u64 = 300;
 const DEFAULT_BACKGROUND_RUNTIME_SECONDS: u64 = 3600;
@@ -29,6 +31,12 @@ const MAX_DIFF_CHARS: usize = 32_000;
 const MAX_DIRECTORY_ENTRIES: usize = 1_000;
 const MAX_SKILL_DESCRIPTION_CHARS: usize = 280;
 const MAX_AGENTS_GUIDANCE_CHARS: usize = 24_000;
+const MAX_WEB_SEARCH_RESULTS: u64 = 10;
+const DEFAULT_WEB_SEARCH_RESULTS: u64 = 5;
+const MAX_WEB_ANSWER_CHARS: usize = 4_000;
+const MAX_WEB_RESULT_CONTENT_CHARS: usize = 2_000;
+const MAX_WEB_RAW_CONTENT_CHARS: usize = 8_000;
+const MAX_WEB_ERROR_CHARS: usize = 2_000;
 
 #[derive(Debug, Clone, Copy)]
 pub enum SearchMode {
@@ -90,6 +98,7 @@ pub struct WorkspaceTools {
     active_model_name: String,
     active_model_id: String,
     global_skill_root: PathBuf,
+    web_search_config: Option<WebSearchConfig>,
 }
 
 impl WorkspaceTools {
@@ -104,6 +113,7 @@ impl WorkspaceTools {
             active_model_name: DEFAULT_MODEL_NAME.to_string(),
             active_model_id: DEFAULT_MODEL.to_string(),
             global_skill_root: default_global_skill_root(),
+            web_search_config: None,
         }
     }
 
@@ -131,6 +141,18 @@ impl WorkspaceTools {
     pub fn with_global_skill_root(mut self, root: impl AsRef<Path>) -> Self {
         self.global_skill_root = expand_home_path(root.as_ref());
         self
+    }
+
+    pub fn with_web_search_config(mut self, config: Option<WebSearchConfig>) -> Self {
+        self.web_search_config = config;
+        self
+    }
+
+    pub async fn execute_async(&self, tool_name: &str, input: &Value) -> Result<Value> {
+        if tool_name == "web_search" {
+            return self.web_search(input).await;
+        }
+        self.execute(tool_name, input)
     }
 
     pub fn execute(&self, tool_name: &str, input: &Value) -> Result<Value> {
@@ -243,31 +265,7 @@ impl WorkspaceTools {
                 self.list_directory(path, recursive, max_depth, filter)
             }
             "web_search" => {
-                ensure_allowed_fields(input, &["query", "domains", "recencyDays", "maxResults"], &[])?;
-                let query = input
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("web_search requires input.query"))?;
-                let query = query.trim();
-                if query.is_empty() {
-                    return Err(anyhow!("web_search query must not be empty"));
-                }
-                let domains = optional_string_array(input, "domains")?;
-                let recency_days = optional_u64(input, "recencyDays")?;
-                let max_results = optional_u64(input, "maxResults")?.unwrap_or(3).clamp(1, 10);
-                Ok(json!({
-                    "mock": true,
-                    "query": query,
-                    "domains": domains,
-                    "recencyDays": recency_days,
-                    "results": (0..max_results)
-                        .map(|index| json!({
-                            "title": format!("Mock web search result {} for {query}", index + 1),
-                            "url": format!("https://example.invalid/brainx/search/{}", index + 1),
-                            "snippet": format!("Mock result for '{query}'. Real web search is not enabled in this brainx build.")
-                        }))
-                        .collect::<Vec<_>>()
-                }))
+                Err(anyhow!("web_search requires async execution"))
             }
             "write_file" => {
                 ensure_allowed_fields(input, &["path", "content", "overwrite", "createParents"], &["mode", "bytes"])?;
@@ -509,6 +507,7 @@ impl WorkspaceTools {
 
     pub fn skill_inventory(&self) -> Result<Value> {
         Ok(json!({
+            "projectRoot": normalize_path(&self.root).display().to_string(),
             "project": scan_skill_root(&self.root.join(".agents/skills"), "project")?,
             "global": scan_skill_root(&self.global_skill_root, "global")?
         }))
@@ -837,6 +836,108 @@ impl WorkspaceTools {
                 "maxEntries": MAX_DIRECTORY_ENTRIES
             }
         }))
+    }
+
+    async fn web_search(&self, input: &Value) -> Result<Value> {
+        ensure_allowed_fields(
+            input,
+            &[
+                "query",
+                "searchDepth",
+                "topic",
+                "maxResults",
+                "days",
+                "includeDomains",
+                "excludeDomains",
+                "includeAnswer",
+                "includeRawContent",
+            ],
+            &["domains", "recencyDays", "search_type", "num_results"],
+        )?;
+        let config = self
+            .web_search_config
+            .as_ref()
+            .ok_or_else(|| anyhow!("web_search is not configured"))?;
+        if config.provider.trim() != "tavily" {
+            return Err(anyhow!("web_search provider must be tavily"));
+        }
+        let query = input
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("web_search requires input.query"))?
+            .trim()
+            .to_string();
+        if query.is_empty() {
+            return Err(anyhow!("web_search query must not be empty"));
+        }
+        let search_depth = match input.get("searchDepth").and_then(Value::as_str).unwrap_or("basic") {
+            "basic" => "basic",
+            "advanced" => "advanced",
+            _ => return Err(anyhow!("searchDepth must be basic or advanced")),
+        };
+        let topic = match input.get("topic").and_then(Value::as_str).unwrap_or("general") {
+            "general" => "general",
+            "news" => "news",
+            "finance" => "finance",
+            _ => return Err(anyhow!("topic must be general, news, or finance")),
+        };
+        let max_results = optional_u64(input, "maxResults")?
+            .unwrap_or(DEFAULT_WEB_SEARCH_RESULTS)
+            .clamp(1, MAX_WEB_SEARCH_RESULTS);
+        let days = optional_u64(input, "days")?.map(|value| value.clamp(1, 30));
+        let include_answer = input.get("includeAnswer").and_then(Value::as_bool).unwrap_or(true);
+        let include_raw_content = input
+            .get("includeRawContent")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let include_domains = optional_string_array(input, "includeDomains")?;
+        let exclude_domains = optional_string_array(input, "excludeDomains")?;
+        let api_key = resolve_secret_value(&config.api_key, "web_search")?;
+        let timeout = Duration::from_secs(config.timeout_seconds.clamp(1, 120));
+        let http = Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("failed to build Tavily client")?;
+        let mut body = json!({
+            "query": query,
+            "search_depth": search_depth,
+            "topic": topic,
+            "max_results": max_results,
+            "include_answer": include_answer,
+            "include_raw_content": include_raw_content,
+        });
+        if let Some(days) = days {
+            body["days"] = json!(days);
+        }
+        if !include_domains.is_empty() {
+            body["include_domains"] = json!(include_domains);
+        }
+        if !exclude_domains.is_empty() {
+            body["exclude_domains"] = json!(exclude_domains);
+        }
+        let url = format!("{}/search", config.base_url.trim_end_matches('/'));
+        let response = http
+            .post(url)
+            .bearer_auth(&api_key)
+            .json(&body)
+            .send()
+            .await
+            .context("failed to call Tavily search")?;
+        let status = response.status();
+        let response_body = response
+            .text()
+            .await
+            .context("failed to read Tavily search response")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "Tavily search returned HTTP {}: {}",
+                status.as_u16(),
+                web_response_excerpt(&response_body, &api_key)
+            ));
+        }
+        let payload: Value = serde_json::from_str(&response_body)
+            .context("failed to decode Tavily search response")?;
+        normalize_tavily_search_response(&payload)
     }
 
     fn search_workspace_limited(&self, query: &str, mode: SearchMode, max_results: usize) -> Result<SearchResults> {
@@ -1567,6 +1668,26 @@ pub fn default_tool_schemas() -> Vec<Value> {
             }),
         ),
         tool_schema(
+            "web_search",
+            "Search the public web through Tavily for current facts, documentation, news, or external references that are not available in the workspace. Prefer precise queries and include domains when source quality matters.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Precise natural-language search query."},
+                    "searchDepth": {"type": "string", "enum": ["basic", "advanced"], "default": "basic"},
+                    "topic": {"type": "string", "enum": ["general", "news", "finance"], "default": "general"},
+                    "maxResults": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                    "days": {"type": "integer", "minimum": 1, "maximum": 30, "description": "Recency window for news searches."},
+                    "includeDomains": {"type": "array", "items": {"type": "string"}, "description": "Restrict results to these domains."},
+                    "excludeDomains": {"type": "array", "items": {"type": "string"}, "description": "Exclude results from these domains."},
+                    "includeAnswer": {"type": "boolean", "default": true},
+                    "includeRawContent": {"type": "boolean", "default": false}
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        ),
+        tool_schema(
             "ask_user",
             "Ask the user for clarification, approval, a preference, or missing input. Use only when tool exploration cannot answer the question. Provide concise options when possible.",
             json!({
@@ -2032,6 +2153,65 @@ fn truncate_text(text: impl AsRef<str>, max_chars: usize) -> TruncatedText {
         truncated: true,
         original_chars,
     }
+}
+
+fn normalize_tavily_search_response(payload: &Value) -> Result<Value> {
+    let answer = payload.get("answer").and_then(Value::as_str).unwrap_or("");
+    let answer = truncate_text(answer, MAX_WEB_ANSWER_CHARS);
+    let mut truncated = answer.truncated;
+    let result_items = payload
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let results = result_items
+        .iter()
+        .map(|result| {
+            let title = result.get("title").and_then(Value::as_str).unwrap_or("");
+            let url = result.get("url").and_then(Value::as_str).unwrap_or("");
+            let content = result.get("content").and_then(Value::as_str).unwrap_or("");
+            let content = truncate_text(content, MAX_WEB_RESULT_CONTENT_CHARS);
+            let raw = result
+                .get("raw_content")
+                .or_else(|| result.get("rawContent"))
+                .and_then(Value::as_str)
+                .map(|raw| truncate_text(raw, MAX_WEB_RAW_CONTENT_CHARS));
+            truncated = truncated || content.truncated || raw.as_ref().map(|value| value.truncated).unwrap_or(false);
+            json!({
+                "title": title,
+                "url": url,
+                "content": content.text,
+                "score": result.get("score").cloned().unwrap_or(Value::Null),
+                "rawContent": raw.map(|value| value.text)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(json!({
+        "query": payload.get("query").and_then(Value::as_str).unwrap_or(""),
+        "answer": answer.text,
+        "results": results,
+        "requestId": payload
+            .get("request_id")
+            .or_else(|| payload.get("requestId"))
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "responseTime": payload
+            .get("response_time")
+            .or_else(|| payload.get("responseTime"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "truncated": truncated
+    }))
+}
+
+fn web_response_excerpt(body: &str, api_key: &str) -> String {
+    let redacted = if api_key.len() >= 8 {
+        body.replace(api_key, "<redacted>")
+    } else {
+        body.to_string()
+    };
+    truncate_text(redacted, MAX_WEB_ERROR_CHARS).text
 }
 
 fn truncate_text_bytes(text: &str, max_bytes: usize) -> TruncatedText {

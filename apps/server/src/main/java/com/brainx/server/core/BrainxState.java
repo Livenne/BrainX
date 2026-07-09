@@ -40,7 +40,7 @@ public class BrainxState {
   private static final Set<String> SUPPORTED_TOOLS = union(union(LOCAL_TOOLS, BROWSER_TOOLS), SERVER_TOOLS);
   private static final Set<String> ZERO_ARGUMENT_TOOLS = Set.of("get_env");
   private static final Set<String> CHAT_COMMANDS = Set.of("compact", "clear", "new", "model", "session", "fork", "init", "rename", "delete", "workspace");
-  private static final String DEFAULT_MODEL_NAME = "nvidia-step";
+  private static final String DEFAULT_MODEL_NAME = "nvidia:stepfun-ai/step-3.7-flash";
   private static final int DEFAULT_CONTEXT_WINDOW = 128_000;
   private static final int MAX_TOOL_RESULT_MESSAGE_CHARS = 64_000;
   private static final int MAX_ATTACHMENTS_PER_MESSAGE = 15;
@@ -75,6 +75,7 @@ public class BrainxState {
       """;
 
   private final long askUserTimeoutSeconds;
+  private final BrainxStateStore store;
   private final Map<String, WorkspaceRecord> workspaces = new LinkedHashMap<>();
   private final Map<String, AgentRecord> agents = new LinkedHashMap<>();
   private final Map<String, BranchRecord> branches = new LinkedHashMap<>();
@@ -89,6 +90,8 @@ public class BrainxState {
   private final Map<String, String> activeModelNamesByWorkspace = new LinkedHashMap<>();
   private final Map<String, List<Map<String, Object>>> availableModelsByWorkspace = new LinkedHashMap<>();
   private final Map<String, Map<String, Object>> lastTokenUsageByWorkspace = new LinkedHashMap<>();
+  private final Map<String, Map<String, Integer>> tokenUsageTotalsByWorkspaceAndModel = new LinkedHashMap<>();
+  private final Map<String, Map<String, Object>> modelCatalogByDaemon = new LinkedHashMap<>();
   private final Map<String, ExecutionRequestRecord> executionRequests = new LinkedHashMap<>();
   private final Map<String, SkillProposalRecord> skillProposals = new LinkedHashMap<>();
   private final Map<String, Map<String, Object>> skillInventoryByDaemon = new LinkedHashMap<>();
@@ -101,6 +104,7 @@ public class BrainxState {
   private final Set<String> streamEventKeys = new HashSet<>();
 
   private record NormalizedToolCall(String callId, String toolName, Map<String, Object> arguments) {}
+  private record ContextWindowBudget(int maxTokens, boolean known) {}
 
   private static Set<String> union(Set<String> first, Set<String> second) {
     var result = new HashSet<String>();
@@ -109,9 +113,259 @@ public class BrainxState {
     return Set.copyOf(result);
   }
 
-  public BrainxState(@Value("${brainx.ask-user-timeout-seconds:120}") long askUserTimeoutSeconds) {
+  public BrainxState(
+      @Value("${brainx.ask-user-timeout-seconds:120}") long askUserTimeoutSeconds,
+      BrainxStateStore store
+  ) {
     this.askUserTimeoutSeconds = Math.max(0, askUserTimeoutSeconds);
-    seedLocalWorkspace();
+    this.store = store;
+    var snapshot = store.load();
+    if (snapshot.isPresent()) {
+      restore(snapshot.get());
+    } else {
+      seedLocalWorkspace();
+    }
+  }
+
+  public synchronized void persist() {
+    store.save(snapshot());
+  }
+
+  private BrainxStateSnapshot snapshot() {
+    return new BrainxStateSnapshot(
+        Map.copyOf(workspaces),
+        Map.copyOf(agents),
+        Map.copyOf(branches),
+        Map.copyOf(runs),
+        Map.copyOf(daemons),
+        Map.copyOf(workspaceIdsByDaemon),
+        Map.copyOf(users),
+        Map.copyOf(userIdsByUsername),
+        Map.copyOf(authSessions),
+        Map.copyOf(bindCodes),
+        Map.copyOf(approvalPolicies),
+        Map.copyOf(activeModelNamesByWorkspace),
+        Map.copyOf(availableModelsByWorkspace),
+        Map.copyOf(lastTokenUsageByWorkspace),
+        Map.copyOf(tokenUsageTotalsByWorkspaceAndModel),
+        Map.copyOf(modelCatalogByDaemon),
+        Map.copyOf(executionRequests),
+        Map.copyOf(skillProposals),
+        Map.copyOf(skillInventoryByDaemon),
+        Map.copyOf(skillProposalExecutionIds),
+        Map.copyOf(subagentTasks),
+        Map.copyOf(chatSessions),
+        Map.copyOf(chatSessionIdsByRun),
+        Map.copyOf(runSteps),
+        Map.copyOf(executionEvents),
+        Set.copyOf(streamEventKeys)
+    );
+  }
+
+  private void restore(BrainxStateSnapshot snapshot) {
+    replaceMap(workspaces, snapshot.workspaces());
+    replaceMap(agents, snapshot.agents());
+    replaceMap(branches, snapshot.branches());
+    replaceMap(runs, snapshot.runs());
+    replaceMap(daemons, snapshot.daemons());
+    replaceMap(workspaceIdsByDaemon, snapshot.workspaceIdsByDaemon());
+    replaceMap(users, snapshot.users());
+    replaceMap(userIdsByUsername, snapshot.userIdsByUsername());
+    replaceMap(authSessions, snapshot.authSessions());
+    replaceMap(bindCodes, snapshot.bindCodes());
+    replaceMap(approvalPolicies, snapshot.approvalPolicies());
+    replaceMap(activeModelNamesByWorkspace, snapshot.activeModelNamesByWorkspace());
+    replaceMap(availableModelsByWorkspace, snapshot.availableModelsByWorkspace());
+    replaceMap(lastTokenUsageByWorkspace, snapshot.lastTokenUsageByWorkspace());
+    replaceMap(tokenUsageTotalsByWorkspaceAndModel, snapshot.tokenUsageTotalsByWorkspaceAndModel());
+    replaceMap(modelCatalogByDaemon, snapshot.modelCatalogByDaemon());
+    replaceMap(executionRequests, sanitizedExecutionRequests(snapshot.executionRequests()));
+    replaceMap(skillProposals, snapshot.skillProposals());
+    supersedeRestoredDuplicateSkillProposals();
+    replaceMap(skillInventoryByDaemon, snapshot.skillInventoryByDaemon());
+    replaceMap(skillProposalExecutionIds, snapshot.skillProposalExecutionIds());
+    replaceMap(subagentTasks, snapshot.subagentTasks());
+    replaceMap(chatSessions, sanitizedChatSessions(snapshot.chatSessions()));
+    replaceMap(chatSessionIdsByRun, snapshot.chatSessionIdsByRun());
+    replaceMap(runSteps, snapshot.runSteps());
+    replaceMap(executionEvents, snapshot.executionEvents());
+    streamEventKeys.clear();
+    if (snapshot.streamEventKeys() != null) {
+      streamEventKeys.addAll(snapshot.streamEventKeys());
+    }
+    if (workspaces.isEmpty()) {
+      seedLocalWorkspace();
+    }
+  }
+
+  private <K, V> void replaceMap(Map<K, V> target, Map<K, V> source) {
+    target.clear();
+    if (source != null) {
+      target.putAll(source);
+    }
+  }
+
+  private Map<String, ChatSessionRecord> sanitizedChatSessions(Map<String, ChatSessionRecord> source) {
+    if (source == null || source.isEmpty()) {
+      return Map.of();
+    }
+    var sanitized = new LinkedHashMap<String, ChatSessionRecord>();
+    source.forEach((id, session) -> sanitized.put(id, session.withMessages(
+        sanitizedRestoredMessages(session.messages()),
+        session.runStatus(),
+        session.updatedAt()
+    )));
+    return sanitized;
+  }
+
+  private Map<String, ExecutionRequestRecord> sanitizedExecutionRequests(Map<String, ExecutionRequestRecord> source) {
+    if (source == null || source.isEmpty()) {
+      return Map.of();
+    }
+    var sanitized = new LinkedHashMap<String, ExecutionRequestRecord>();
+    source.forEach((id, request) -> sanitized.put(id, sanitizedExecutionRequest(request)));
+    return sanitized;
+  }
+
+  private ExecutionRequestRecord sanitizedExecutionRequest(ExecutionRequestRecord request) {
+    if (request.input() == null || !request.input().containsKey("messages")) {
+      return request;
+    }
+    var messages = objectListValue(request.input().get("messages"));
+    if (messages.isEmpty()) {
+      return request;
+    }
+    var input = new LinkedHashMap<>(request.input());
+    input.put("messages", sanitizedRestoredMessages(messages));
+    return new ExecutionRequestRecord(
+        request.executionId(),
+        request.workspaceId(),
+        request.clientDaemonId(),
+        request.agentId(),
+        request.branchId(),
+        request.runId(),
+        request.status(),
+        request.capabilityId(),
+        request.toolName(),
+        Map.copyOf(input),
+        request.riskTier(),
+        request.idempotencyKey()
+    );
+  }
+
+  private List<Map<String, Object>> sanitizedRestoredMessages(List<Map<String, Object>> messages) {
+    if (messages == null || messages.isEmpty()) {
+      return List.of();
+    }
+    var sanitized = new ArrayList<Map<String, Object>>();
+    var removedToolCallIds = new HashSet<String>();
+    for (var message : messages) {
+      var role = stringValue(message.get("role"));
+      if ("assistant".equals(role)) {
+        var normalized = sanitizedAssistantMessage(message, removedToolCallIds);
+        if (normalized.isPresent()) {
+          sanitized.add(normalized.get());
+        }
+        continue;
+      }
+      if ("tool".equals(role) && shouldDropRestoredToolResult(message, removedToolCallIds)) {
+        continue;
+      }
+      sanitized.add(message);
+    }
+    return sanitized;
+  }
+
+  private Optional<Map<String, Object>> sanitizedAssistantMessage(Map<String, Object> message, Set<String> removedToolCallIds) {
+    var toolCalls = objectListValue(message.get("toolCalls"));
+    var toolCallsKey = "toolCalls";
+    if (toolCalls.isEmpty() && message.containsKey("tool_calls")) {
+      toolCalls = objectListValue(message.get("tool_calls"));
+      toolCallsKey = "tool_calls";
+    }
+    if (toolCalls.isEmpty()) {
+      return Optional.of(message);
+    }
+
+    var keptToolCalls = new ArrayList<Map<String, Object>>();
+    for (var toolCall : toolCalls) {
+      var toolName = restoredToolCallName(toolCall);
+      if (toolName.isBlank()) {
+        var id = stringValue(toolCall.get("id"));
+        if (!id.isBlank()) {
+          removedToolCallIds.add(id);
+        }
+      } else {
+        keptToolCalls.add(toolCall);
+      }
+    }
+    if (keptToolCalls.size() == toolCalls.size()) {
+      return Optional.of(message);
+    }
+    if (keptToolCalls.isEmpty() && restoredMessageBodyIsBlank(message)) {
+      return Optional.empty();
+    }
+
+    var copy = new LinkedHashMap<>(message);
+    copy.put(toolCallsKey, List.copyOf(keptToolCalls));
+    return Optional.of(copy);
+  }
+
+  private boolean shouldDropRestoredToolResult(Map<String, Object> message, Set<String> removedToolCallIds) {
+    var toolCallId = stringValue(message.get("toolCallId"));
+    if (toolCallId.isBlank()) {
+      toolCallId = stringValue(message.get("tool_call_id"));
+    }
+    if (!toolCallId.isBlank() && removedToolCallIds.contains(toolCallId)) {
+      return true;
+    }
+    return stringValue(message.get("name")).isBlank();
+  }
+
+  private String restoredToolCallName(Map<String, Object> toolCall) {
+    var directName = stringValue(toolCall.get("name"));
+    if (!directName.isBlank()) {
+      return directName;
+    }
+    if (toolCall.get("function") instanceof Map<?, ?> function) {
+      return stringValue(function.get("name"));
+    }
+    return "";
+  }
+
+  private boolean restoredMessageBodyIsBlank(Map<String, Object> message) {
+    return restoredContentIsBlank(message.get("content")) && stringValue(message.get("thinking")).isBlank();
+  }
+
+  private boolean restoredContentIsBlank(Object content) {
+    if (content == null) {
+      return true;
+    }
+    if (content instanceof String text) {
+      return text.isBlank();
+    }
+    if (content instanceof List<?> list) {
+      return list.isEmpty();
+    }
+    if (content instanceof Map<?, ?> map) {
+      return map.isEmpty();
+    }
+    return false;
+  }
+
+  private List<Map<String, Object>> objectListValue(Object value) {
+    if (!(value instanceof List<?> list)) {
+      return List.of();
+    }
+    var objects = new ArrayList<Map<String, Object>>();
+    for (var item : list) {
+      if (item instanceof Map<?, ?> map) {
+        var object = new LinkedHashMap<String, Object>();
+        map.forEach((key, itemValue) -> object.put(String.valueOf(key), itemValue));
+        objects.add(object);
+      }
+    }
+    return objects;
   }
 
   public synchronized AuthResponse registerUser(String username, String password) {
@@ -210,27 +464,42 @@ public class BrainxState {
     if (bindCode.expiresAt().isBefore(now)) {
       throw new StateConflictException("Bind code has expired.");
     }
-    var daemon = bindCode.daemonId() == null || bindCode.daemonId().isBlank()
-        ? new ClientDaemonRecord(
+    ClientDaemonRecord daemon;
+    if (bindCode.daemonId() == null || bindCode.daemonId().isBlank()) {
+      daemon = new ClientDaemonRecord(
             id("cd"),
             bindCode.workspaceId(),
             user.id(),
+            "legacy-" + randomToken(10),
+            "bc_" + randomToken(36),
             bindCode.deviceName(),
+            "",
             "active",
             bindCode.capabilities(),
             now,
             now
-        )
-        : requireDaemon(bindCode.daemonId()).boundTo(user.id(), now);
+      );
+    } else {
+      var existingDaemon = requireDaemon(bindCode.daemonId());
+      if (existingDaemon.userId() != null && !existingDaemon.userId().isBlank() && !existingDaemon.userId().equals(user.id())) {
+        throw new ForbiddenException("Client daemon belongs to a different user.");
+      }
+      daemon = existingDaemon.boundTo(user.id(), now);
+    }
     daemons.put(daemon.id(), daemon);
     bindCodes.put(bindCode.code(), bindCode.used(now));
     return daemon;
   }
 
-  public synchronized List<ClientDaemonRecord> clientDaemons(String token) {
+  public synchronized Map<String, Object> completeBindView(String token, String code) {
+    return clientDaemonView(completeBind(token, code));
+  }
+
+  public synchronized List<Map<String, Object>> clientDaemons(String token) {
     var user = requireUserByToken(token);
     return daemons.values().stream()
         .filter(daemon -> user.id().equals(daemon.userId()))
+        .map(this::clientDaemonView)
         .toList();
   }
 
@@ -238,11 +507,7 @@ public class BrainxState {
     if (!confirm) {
       throw new BadRequestException("Unbind requires explicit confirmation.");
     }
-    var user = requireUserByToken(token);
-    var daemon = requireDaemon(daemonId);
-    if (daemon.userId() != null && !daemon.userId().equals(user.id())) {
-      throw new ForbiddenException("Client daemon belongs to a different user.");
-    }
+    var daemon = requireDaemonAuthorizedByToken(token, daemonId, false);
     daemons.put(daemon.id(), daemon.withStatus("revoked", Instant.now()));
   }
 
@@ -279,6 +544,48 @@ public class BrainxState {
         .toList();
   }
 
+  public synchronized Map<String, Object> dashboard(String token, String workspaceId) {
+    var user = requireUserByToken(token);
+    var workspace = requireWorkspace(workspaceId);
+    var userWorkspaceIds = workspaceIdsForUser(user.id());
+    if (!DEV_WORKSPACE_ID.equals(workspaceId) && !userWorkspaceIds.contains(workspaceId)) {
+      throw new ForbiddenException("Workspace does not belong to the current user.");
+    }
+    expireTimedOutAskUser(Instant.now());
+    var sessions = chatSessions.values().stream()
+        .filter(session -> workspaceId.equals(session.workspaceId()))
+        .map(this::sessionForResponse)
+        .toList();
+    var dashboard = new LinkedHashMap<String, Object>();
+    dashboard.put("workspace", workspace);
+    dashboard.put("agents", agents.values().stream()
+        .filter(agent -> workspaceId.equals(agent.workspaceId()))
+        .map(this::agentProfile)
+        .toList());
+    dashboard.put("activeRuns", runs.values().stream()
+        .filter(run -> workspaceId.equals(run.workspaceId()))
+        .filter(run -> isActiveRunStatus(run.status()))
+        .map(this::runSummary)
+        .toList());
+    dashboard.put("pendingApprovals", List.of());
+    dashboard.put("branches", branches.values().stream()
+        .filter(branch -> workspaceId.equals(branch.workspaceId()))
+        .map(this::branchSummary)
+        .toList());
+    dashboard.put("skillDrafts", skillProposals.values().stream()
+        .filter(proposal -> workspaceId.equals(proposal.workspaceId()))
+        .toList());
+    dashboard.put("daemons", daemons.values().stream()
+        .filter(daemon -> user.id().equals(daemon.userId()))
+        .filter(daemon -> daemonCanAccessWorkspace(daemon, workspaceId))
+        .map(this::clientDaemonView)
+        .toList());
+    dashboard.put("chatSessions", sessions);
+    dashboard.put("recentEvents", recentWorkspaceEvents(workspaceId, 20));
+    dashboard.put("stats", dashboardStats(workspaceId, sessions));
+    return Map.copyOf(dashboard);
+  }
+
   public synchronized WorkspaceRecord createWorkspace(String name) {
     var workspace = new WorkspaceRecord(id("w"), name, "", false, "active", Instant.now());
     workspaces.put(workspace.id(), workspace);
@@ -287,11 +594,7 @@ public class BrainxState {
   }
 
   public synchronized void syncClientWorkspaces(String token, String daemonId, List<ClientWorkspaceRecord> syncedWorkspaces) {
-    var user = requireUserByToken(token);
-    var daemon = requireDaemon(daemonId);
-    if (daemon.userId() != null && !daemon.userId().equals(user.id())) {
-      throw new ForbiddenException("Client daemon belongs to a different user.");
-    }
+    var daemon = requireDaemonAuthorizedByToken(token, daemonId, true);
     if (!"active".equals(daemon.status())) {
       throw new ForbiddenException("Client daemon is not active.");
     }
@@ -354,6 +657,7 @@ public class BrainxState {
         run.id(),
         goal
     );
+    execution = execution.assignedTo(resolveClientDaemonId(agent.workspaceId(), ""));
     executionRequests.put(execution.executionId(), execution);
     recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
     recordEvent(
@@ -376,10 +680,16 @@ public class BrainxState {
   }
 
   public synchronized List<ChatSessionRecord> chatSessions(String workspaceId) {
+    return chatSessions(workspaceId, "");
+  }
+
+  public synchronized List<ChatSessionRecord> chatSessions(String workspaceId, String clientDaemonId) {
     requireWorkspace(workspaceId);
     expireTimedOutAskUser(Instant.now());
+    var normalizedClientDaemonId = clientDaemonId == null ? "" : clientDaemonId.trim();
     return chatSessions.values().stream()
         .filter(session -> session.workspaceId().equals(workspaceId))
+        .filter(session -> normalizedClientDaemonId.isBlank() || normalizedClientDaemonId.equals(session.clientDaemonId()))
         .map(this::sessionForResponse)
         .toList();
   }
@@ -395,8 +705,17 @@ public class BrainxState {
   }
 
   public synchronized ChatSessionRecord createChatSession(String workspaceId, String title) {
+    return createChatSession(workspaceId, title, "");
+  }
+
+  public synchronized ChatSessionRecord createChatSession(String workspaceId, String title, String clientDaemonId) {
+    return sessionForResponse(createRawChatSession(workspaceId, title, clientDaemonId));
+  }
+
+  private ChatSessionRecord createRawChatSession(String workspaceId, String title, String clientDaemonId) {
     var workspace = requireWorkspace(workspaceId);
     var runtime = primaryChatSession(workspaceId).orElseThrow(() -> new NotFoundException("Chat session not found."));
+    var resolvedClientDaemonId = resolveClientDaemonId(workspaceId, clientDaemonId);
     var now = Instant.now();
     var sessionId = id("chat");
     var session = new ChatSessionRecord(
@@ -406,6 +725,7 @@ public class BrainxState {
         sessionId,
         null,
         workspace.id(),
+        resolvedClientDaemonId,
         workspace.name(),
         runtime.currentWorkspace(),
         runtime.agentId(),
@@ -413,7 +733,7 @@ public class BrainxState {
         runtime.branchId(),
         runtime.branchName(),
         runtime.skillName(),
-        runtime.clientName(),
+        clientNameForDaemon(resolvedClientDaemonId, runtime.clientName()),
         "",
         "completed",
         List.of(),
@@ -430,7 +750,7 @@ public class BrainxState {
         List.of()
     );
     chatSessions.put(session.id(), session);
-    return sessionForResponse(session);
+    return session;
   }
 
   public synchronized ChatSessionRecord renameChatSession(String workspaceId, String sessionId, String title) {
@@ -443,6 +763,24 @@ public class BrainxState {
 
   public synchronized ChatSessionRecord sendChatMessage(String workspaceId, String content, List<Map<String, Object>> attachments) {
     var session = primaryChatSession(workspaceId).orElseThrow(() -> new NotFoundException("Chat session not found."));
+    return sendChatMessage(workspaceId, session.id(), content, attachments);
+  }
+
+  public synchronized ChatSessionRecord sendChatMessage(
+      String workspaceId,
+      String content,
+      List<Map<String, Object>> attachments,
+      String clientDaemonId
+  ) {
+    var normalizedClientDaemonId = clientDaemonId == null ? "" : clientDaemonId.trim();
+    if (normalizedClientDaemonId.isBlank()) {
+      return sendChatMessage(workspaceId, content, attachments);
+    }
+    var session = chatSessions.values().stream()
+        .filter(candidate -> workspaceId.equals(candidate.workspaceId()))
+        .filter(candidate -> normalizedClientDaemonId.equals(candidate.clientDaemonId()))
+        .findFirst()
+        .orElseGet(() -> createRawChatSession(workspaceId, null, normalizedClientDaemonId));
     return sendChatMessage(workspaceId, session.id(), content, attachments);
   }
 
@@ -471,6 +809,7 @@ public class BrainxState {
         stringValue(session.rootSessionId()).isBlank() ? session.id() : session.rootSessionId(),
         session.id(),
         session.workspaceId(),
+        session.clientDaemonId(),
         session.workspaceName(),
         session.currentWorkspace(),
         session.agentId(),
@@ -571,9 +910,10 @@ public class BrainxState {
         0,
         agentLoopMessages(updated),
         List.of(),
-        activeModelName(session.workspaceId()),
+        activeModelName(updated),
         updated.currentWorkspace()
     );
+    execution = execution.assignedTo(session.clientDaemonId());
     executionRequests.put(execution.executionId(), execution);
     recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
     recordEvent(
@@ -768,11 +1108,12 @@ public class BrainxState {
     };
   }
 
-  private Map<String, Object> timelineNotice(String kind, String message, String detail, Instant now) {
+  private Map<String, Object> timelineNotice(String kind, String message, String detail, int afterMessageIndex, Instant now) {
     var notice = new LinkedHashMap<String, Object>();
     notice.put("id", id("notice"));
     notice.put("kind", kind);
     notice.put("message", message);
+    notice.put("afterMessageIndex", Math.max(0, afterMessageIndex));
     if (detail != null && !detail.isBlank()) {
       notice.put("detail", detail);
     }
@@ -782,7 +1123,7 @@ public class BrainxState {
 
   private List<Map<String, Object>> timelineNoticesWith(ChatSessionRecord session, String kind, String message, String detail, Instant now) {
     var notices = new ArrayList<>(session.timelineNotices());
-    notices.add(timelineNotice(kind, message, detail, now));
+    notices.add(timelineNotice(kind, message, detail, session.messages().size(), now));
     return List.copyOf(notices);
   }
 
@@ -791,7 +1132,7 @@ public class BrainxState {
       throw new StateConflictException("Cannot clear context while a run is active.");
     }
     var now = Instant.now();
-    var clearNotice = timelineNotice("context_cleared", "已清空上下文", "", now);
+    var clearNotice = timelineNotice("context_cleared", "已清空上下文", "", 0, now);
     var cleared = session.withQueuedInputs(List.of(), now).withMessagesAndTimelineNotices(List.of(), List.of(clearNotice), "completed", now);
     chatSessions.put(cleared.id(), cleared);
     recordEventForSession(session, "context.cleared", "Chat context cleared.", Map.of());
@@ -803,7 +1144,7 @@ public class BrainxState {
     if (modelName.isBlank()) {
       throw new BadRequestException("/model requires arguments.modelName.");
     }
-    var exists = availableModels(session.workspaceId()).stream()
+    var exists = availableModelsForSession(session).stream()
         .anyMatch(model -> modelName.equals(stringValue(model.get("name"))));
     if (!exists) {
       throw new BadRequestException("Unknown model: " + modelName);
@@ -871,9 +1212,10 @@ public class BrainxState {
         0,
         compactModelMessages(session),
         List.of(),
-        activeModelName(session.workspaceId()),
+        activeModelName(session),
         session.currentWorkspace()
     );
+    execution = execution.assignedTo(session.clientDaemonId());
     executionRequests.put(execution.executionId(), execution);
     recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
     recordEvent(
@@ -915,16 +1257,49 @@ public class BrainxState {
     return List.copyOf(executionEvents.getOrDefault(run.id(), List.of()));
   }
 
-  public synchronized ClientDaemonRecord registerDaemon(String workspaceId, String deviceName, List<String> capabilities) {
+  public synchronized ClientDaemonRegistrationResponse registerDaemon(
+      String workspaceId,
+      String deviceName,
+      String operatingSystem,
+      String installationId,
+      List<String> capabilities
+  ) {
     requireWorkspace(workspaceId);
     var now = Instant.now();
-    var daemon = new ClientDaemonRecord(id("cd"), workspaceId, null, deviceName, "active", List.copyOf(capabilities), now, now);
+    var normalizedInstallationId = normalizeInstallationId(installationId);
+    var normalizedOperatingSystem = stringValue(operatingSystem);
+    var normalizedCapabilities = List.copyOf(capabilities == null ? List.of() : capabilities);
+    var existing = daemons.values().stream()
+        .filter(daemon -> normalizedInstallationId.equals(daemon.installationId()))
+        .findFirst();
+    if (existing.isPresent()) {
+      var updated = existing.get().registered(workspaceId, deviceName, normalizedOperatingSystem, normalizedCapabilities, now);
+      daemons.put(updated.id(), updated);
+      return ClientDaemonRegistrationResponse.from(updated);
+    }
+    var daemon = new ClientDaemonRecord(
+        id("cd"),
+        workspaceId,
+        null,
+        normalizedInstallationId,
+        "bc_" + randomToken(36),
+        deviceName,
+        normalizedOperatingSystem,
+        "active",
+        normalizedCapabilities,
+        null,
+        now
+    );
     daemons.put(daemon.id(), daemon);
-    return daemon;
+    return ClientDaemonRegistrationResponse.from(daemon);
   }
 
   public synchronized List<ExecutionRequestRecord> pendingExecutionRequests(String daemonId) {
     var daemon = requireDaemon(daemonId);
+    return pendingExecutionRequestsForDaemon(daemon);
+  }
+
+  private List<ExecutionRequestRecord> pendingExecutionRequestsForDaemon(ClientDaemonRecord daemon) {
     if (!"active".equals(daemon.status())) {
       throw new ForbiddenException("Client daemon is not active.");
     }
@@ -932,18 +1307,14 @@ public class BrainxState {
     daemons.put(daemon.id(), daemon.heartbeat(Instant.now()));
     return executionRequests.values().stream()
         .filter(request -> daemonCanAccessWorkspace(daemon, request.workspaceId()))
+        .filter(request -> request.clientDaemonId() == null || request.clientDaemonId().isBlank() || daemon.id().equals(request.clientDaemonId()))
         .filter(request -> "pending".equals(request.status()))
         .filter(request -> !runIsCancelled(request.runId()))
         .toList();
   }
 
   public synchronized List<ExecutionRequestRecord> pendingExecutionRequests(String token, String daemonId) {
-    var user = requireUserByToken(token);
-    var daemon = requireDaemon(daemonId);
-    if (daemon.userId() != null && !daemon.userId().equals(user.id())) {
-      throw new ForbiddenException("Client daemon belongs to a different user.");
-    }
-    return pendingExecutionRequests(daemonId);
+    return pendingExecutionRequestsForDaemon(requireDaemonAuthorizedByToken(token, daemonId, true));
   }
 
   public synchronized void completeExecution(String daemonId, ExecutionResultRecord result) {
@@ -957,6 +1328,9 @@ public class BrainxState {
     }
     if (!daemonCanAccessWorkspace(daemon, request.workspaceId())) {
       throw new StateConflictException("Execution request does not belong to daemon workspace.");
+    }
+    if (request.clientDaemonId() != null && !request.clientDaemonId().isBlank() && !daemon.id().equals(request.clientDaemonId())) {
+      throw new StateConflictException("Execution request belongs to a different client daemon.");
     }
     if (!"pending".equals(request.status())) {
       return;
@@ -1025,12 +1399,22 @@ public class BrainxState {
   }
 
   public synchronized void completeExecution(String token, String daemonId, ExecutionResultRecord result) {
-    var user = requireUserByToken(token);
-    var daemon = requireDaemon(daemonId);
-    if (daemon.userId() != null && !daemon.userId().equals(user.id())) {
-      throw new ForbiddenException("Client daemon belongs to a different user.");
-    }
+    requireDaemonAuthorizedByToken(token, daemonId, true);
     completeExecution(daemonId, result);
+  }
+
+  public synchronized ExecutionEventRecord submitExecutionStreamEvent(
+      String token,
+      String daemonId,
+      String executionId,
+      String runId,
+      int streamSequence,
+      String streamType,
+      String contentDelta,
+      Map<String, Object> payload
+  ) {
+    requireDaemonAuthorizedByToken(token, daemonId, true);
+    return submitExecutionStreamEvent(daemonId, executionId, runId, streamSequence, streamType, contentDelta, payload);
   }
 
   public synchronized ExecutionEventRecord submitExecutionStreamEvent(
@@ -1055,6 +1439,9 @@ public class BrainxState {
     }
     if (!daemonCanAccessWorkspace(daemon, request.workspaceId())) {
       throw new StateConflictException("Execution request does not belong to daemon workspace.");
+    }
+    if (request.clientDaemonId() != null && !request.clientDaemonId().isBlank() && !daemon.id().equals(request.clientDaemonId())) {
+      throw new StateConflictException("Execution request belongs to a different client daemon.");
     }
     if (runIsCancelled(runId)) {
       return existingOrIgnoredStreamEvent(runId, executionId, streamSequence);
@@ -1350,20 +1737,64 @@ public class BrainxState {
     return List.copyOf(skillProposals.values());
   }
 
-  public synchronized Map<String, Object> skillInventory(String workspaceId) {
+  public synchronized List<SkillProposalRecord> skillProposals(String workspaceId) {
+    if (stringValue(workspaceId).isBlank()) {
+      return skillProposals();
+    }
     requireWorkspace(workspaceId);
-    var mergedProject = new ArrayList<Object>();
-    var mergedGlobal = new ArrayList<Object>();
-    for (var entry : skillInventoryByDaemon.entrySet()) {
-      var daemon = daemons.get(entry.getKey());
-      if (daemon == null || !daemonCanAccessWorkspace(daemon, workspaceId)) {
+    return skillProposals.values().stream()
+        .filter(proposal -> workspaceId.equals(proposal.workspaceId()))
+        .toList();
+  }
+
+  public synchronized Map<String, Object> skillInventory(String workspaceId) {
+    return skillInventory(workspaceId, "", "");
+  }
+
+  public synchronized Map<String, Object> skillInventory(String workspaceId, String clientDaemonId, String currentWorkspace) {
+    requireWorkspace(workspaceId);
+    var normalizedClientDaemonId = stringValue(clientDaemonId).trim();
+    var normalizedCurrentWorkspace = normalizeSkillInventoryRoot(currentWorkspace);
+    if (!normalizedClientDaemonId.isBlank() || !normalizedCurrentWorkspace.isBlank()) {
+      var resolvedClientDaemonId = resolveClientDaemonId(workspaceId, normalizedClientDaemonId);
+      if (resolvedClientDaemonId.isBlank()) {
+        return Map.of(
+            "projectRoot", normalizedCurrentWorkspace,
+            "project", List.of(),
+            "global", List.of(),
+            "globalByDaemon", List.of()
+        );
+      }
+      var inventory = skillInventoryByDaemon.getOrDefault(resolvedClientDaemonId, Map.of());
+      var projectRoot = normalizedCurrentWorkspace.isBlank()
+          ? normalizeSkillInventoryRoot(inventory.get("projectRoot"))
+          : normalizedCurrentWorkspace;
+      return Map.of(
+          "projectRoot", projectRoot,
+          "project", projectSkillsForRoot(inventory, projectRoot),
+          "global", listValue(inventory.get("global")),
+          "globalByDaemon", List.of()
+      );
+    }
+
+    var globalByDaemon = new ArrayList<Map<String, Object>>();
+    for (var daemon : daemons.values()) {
+      if (!daemonCanAccessWorkspace(daemon, workspaceId)) {
         continue;
       }
-      var inventory = entry.getValue();
-      mergedProject.addAll(listValue(inventory.get("project")));
-      mergedGlobal.addAll(listValue(inventory.get("global")));
+      var inventory = skillInventoryByDaemon.getOrDefault(daemon.id(), Map.of());
+      globalByDaemon.add(Map.of(
+          "daemonId", daemon.id(),
+          "deviceName", daemon.deviceName(),
+          "status", daemon.status(),
+          "global", listValue(inventory.get("global"))
+      ));
     }
-    return Map.of("project", mergedProject, "global", mergedGlobal);
+    return Map.of(
+        "project", List.of(),
+        "global", List.of(),
+        "globalByDaemon", globalByDaemon
+    );
   }
 
   public synchronized void syncClientSkills(String daemonId, Map<String, Object> inventory) {
@@ -1371,7 +1802,18 @@ public class BrainxState {
     if (!"active".equals(daemon.status())) {
       throw new ForbiddenException("Client daemon is not active.");
     }
-    skillInventoryByDaemon.put(daemonId, Map.copyOf(inventory == null ? Map.of() : inventory));
+    skillInventoryByDaemon.put(
+        daemonId,
+        normalizedSkillInventory(skillInventoryByDaemon.getOrDefault(daemonId, Map.of()), inventory)
+    );
+  }
+
+  public synchronized void syncClientModels(String daemonId, Map<String, Object> catalog) {
+    var daemon = requireDaemon(daemonId);
+    if (!"active".equals(daemon.status())) {
+      throw new ForbiddenException("Client daemon is not active.");
+    }
+    modelCatalogByDaemon.put(daemonId, normalizedModelCatalog(catalog));
   }
 
   public synchronized SkillProposalRecord approveSkillProposal(String proposalId) {
@@ -1382,9 +1824,7 @@ public class BrainxState {
     if (proposal.path().isBlank() || proposal.markdownContent().isBlank()) {
       throw new BadRequestException("Skill proposal requires path and markdown content before approval.");
     }
-    if (proposal.daemonId().isBlank()) {
-      firstDaemonForWorkspace(proposal.workspaceId());
-    }
+    var targetDaemonId = proposal.daemonId().isBlank() ? firstDaemonForWorkspace(proposal.workspaceId()) : proposal.daemonId();
     var runId = proposal.runId().isBlank() ? ensureSkillReviewRun(proposal.workspaceId()) : proposal.runId();
     var input = new LinkedHashMap<String, Object>();
     input.put("path", proposal.path());
@@ -1400,11 +1840,12 @@ public class BrainxState {
         input,
         "write",
         "pending"
-    );
+    ).assignedTo(targetDaemonId);
     executionRequests.put(request.executionId(), request);
     skillProposalExecutionIds.put(request.executionId(), proposal.id());
     var approved = proposal.withStatus("approved", Instant.now());
     skillProposals.put(approved.id(), approved);
+    supersedeDuplicatePendingSkillProposals(approved);
     return approved;
   }
 
@@ -1413,6 +1854,71 @@ public class BrainxState {
     var rejected = proposal.withStatus("rejected", Instant.now());
     skillProposals.put(rejected.id(), rejected);
     return rejected;
+  }
+
+  private void supersedeDuplicatePendingSkillProposals(SkillProposalRecord acceptedProposal) {
+    var key = skillProposalDedupKey(acceptedProposal);
+    if (key.isBlank()) {
+      return;
+    }
+    var now = Instant.now();
+    var updates = new LinkedHashMap<String, SkillProposalRecord>();
+    for (var candidate : skillProposals.values()) {
+      if (candidate.id().equals(acceptedProposal.id())) {
+        continue;
+      }
+      if (!"review_requested".equals(candidate.status())) {
+        continue;
+      }
+      if (key.equals(skillProposalDedupKey(candidate))) {
+        updates.put(candidate.id(), candidate.withStatus("superseded", now));
+      }
+    }
+    skillProposals.putAll(updates);
+  }
+
+  private void supersedeRestoredDuplicateSkillProposals() {
+    if (skillProposals.isEmpty()) {
+      return;
+    }
+    var acceptedKeys = new HashSet<String>();
+    for (var proposal : skillProposals.values()) {
+      if ("approved".equals(proposal.status()) || "published".equals(proposal.status())) {
+        var key = skillProposalDedupKey(proposal);
+        if (!key.isBlank()) {
+          acceptedKeys.add(key);
+        }
+      }
+    }
+
+    var firstPendingByKey = new HashSet<String>();
+    var now = Instant.now();
+    var updates = new LinkedHashMap<String, SkillProposalRecord>();
+    for (var proposal : skillProposals.values()) {
+      if (!"review_requested".equals(proposal.status())) {
+        continue;
+      }
+      var key = skillProposalDedupKey(proposal);
+      if (key.isBlank()) {
+        continue;
+      }
+      if (acceptedKeys.contains(key) || !firstPendingByKey.add(key)) {
+        updates.put(proposal.id(), proposal.withStatus("superseded", now));
+      }
+    }
+    skillProposals.putAll(updates);
+  }
+
+  private String skillProposalDedupKey(SkillProposalRecord proposal) {
+    var path = normalizeSkillProposalPath(proposal.path());
+    if (stringValue(proposal.workspaceId()).isBlank() || path.isBlank()) {
+      return "";
+    }
+    return proposal.workspaceId() + "\n" + path;
+  }
+
+  private String normalizeSkillProposalPath(String path) {
+    return stringValue(path).trim().replace('\\', '/');
   }
 
   private SkillProposalRecord requireSkillProposal(String proposalId) {
@@ -1518,6 +2024,28 @@ public class BrainxState {
     return user;
   }
 
+  private ClientDaemonRecord requireDaemonAuthorizedByToken(String token, String daemonId, boolean requireBound) {
+    var daemon = requireDaemon(daemonId);
+    var normalizedToken = requireToken(token);
+    if (normalizedToken.equals(daemon.clientToken())) {
+      if (requireBound && (daemon.userId() == null || daemon.userId().isBlank())) {
+        throw new ForbiddenException("Client daemon is not bound.");
+      }
+      if (!"active".equals(daemon.status())) {
+        throw new ForbiddenException("Client daemon is not active.");
+      }
+      return daemon;
+    }
+    var user = requireUserByToken(normalizedToken);
+    if (daemon.userId() != null && !daemon.userId().isBlank() && !daemon.userId().equals(user.id())) {
+      throw new ForbiddenException("Client daemon belongs to a different user.");
+    }
+    if (requireBound && (daemon.userId() == null || daemon.userId().isBlank())) {
+      throw new ForbiddenException("Client daemon is not bound.");
+    }
+    return daemon;
+  }
+
   private void requireUserIfTokenProvided(String token) {
     if (token != null && !token.isBlank()) {
       requireUserByToken(token);
@@ -1543,6 +2071,11 @@ public class BrainxState {
       throw new BadRequestException("Username must contain at least 3 characters.");
     }
     return normalized;
+  }
+
+  private String normalizeInstallationId(String installationId) {
+    var normalized = installationId == null ? "" : installationId.trim();
+    return normalized.isBlank() ? "install_" + randomToken(18) : normalized;
   }
 
   private void validatePassword(String password) {
@@ -1603,7 +2136,7 @@ public class BrainxState {
   }
 
   private void completeModelInvocation(ExecutionRequestRecord request, RunRecord run, ExecutionResultRecord result) {
-    recordTokenUsage(run.workspaceId(), result);
+    recordTokenUsage(run.workspaceId(), stringValue(request.input().get("modelName")), result);
     var phase = stringValue(request.input().get("phase"));
     if (phase.isBlank() || "agent_loop".equals(phase)) {
       completeAgentLoopModel(request, run, result);
@@ -1752,9 +2285,10 @@ public class BrainxState {
         0,
         sessionTitleMessages(session),
         List.of(),
-        activeModelName(session.workspaceId()),
+        activeModelName(session),
         session.currentWorkspace()
     );
+    execution = execution.assignedTo(session.clientDaemonId());
     executionRequests.put(execution.executionId(), execution);
     recordEvent(
         run.id(),
@@ -1807,16 +2341,23 @@ public class BrainxState {
     return normalized;
   }
 
-  private void recordTokenUsage(String workspaceId, ExecutionResultRecord result) {
+  private void recordTokenUsage(String workspaceId, String modelName, ExecutionResultRecord result) {
     var usage = asMap(result.data().get("usage"));
     if (usage.isEmpty()) {
       return;
     }
+    var totalTokens = firstInt(usage, "totalTokens", "total_tokens");
     var normalized = new LinkedHashMap<String, Object>();
     normalized.put("promptTokens", firstInt(usage, "promptTokens", "prompt_tokens"));
     normalized.put("completionTokens", firstInt(usage, "completionTokens", "completion_tokens"));
-    normalized.put("totalTokens", firstInt(usage, "totalTokens", "total_tokens"));
+    normalized.put("totalTokens", totalTokens);
     lastTokenUsageByWorkspace.put(workspaceId, Map.copyOf(normalized));
+    if (totalTokens > 0) {
+      var totals = new LinkedHashMap<>(tokenUsageTotalsByWorkspaceAndModel.getOrDefault(workspaceId, Map.of()));
+      var key = modelName == null || modelName.isBlank() ? DEFAULT_MODEL_NAME : modelName;
+      totals.put(key, totals.getOrDefault(key, 0) + totalTokens);
+      tokenUsageTotalsByWorkspaceAndModel.put(workspaceId, Map.copyOf(totals));
+    }
   }
 
   private int firstInt(Map<String, Object> source, String firstKey, String secondKey) {
@@ -1950,7 +2491,7 @@ public class BrainxState {
           toolInput,
           riskTier,
           requiresApproval ? "waiting_for_approval" : "pending"
-      );
+      ).assignedTo(session.clientDaemonId());
       executionRequests.put(toolRequest.executionId(), toolRequest);
       recordStep(run.id(), "execution_request", toolRequest.status(), toolRequest.executionId());
       recordEvent(
@@ -2196,6 +2737,132 @@ public class BrainxState {
     throw new BadRequestException("Expected boolean value.");
   }
 
+  private Map<String, Object> normalizedModelCatalog(Map<String, Object> catalog) {
+    var source = catalog == null ? Map.<String, Object>of() : catalog;
+    var models = asMapList(source.get("models")).stream()
+        .map(this::normalizedModelCatalogEntry)
+        .filter(model -> !model.isEmpty())
+        .toList();
+    var providers = asMapList(source.get("providers")).stream()
+        .map(this::normalizedModelProviderStatus)
+        .filter(provider -> !provider.isEmpty())
+        .toList();
+    return Map.of(
+        "models", models,
+        "providers", providers
+    );
+  }
+
+  private Map<String, Object> normalizedModelCatalogEntry(Map<String, Object> raw) {
+    var providerName = stringValue(raw.get("providerName")).trim();
+    var model = stringValue(raw.get("model")).trim();
+    var key = stringValue(raw.get("key")).trim();
+    if (key.isBlank() && !providerName.isBlank() && !model.isBlank()) {
+      key = providerName + ":" + model;
+    }
+    if (key.isBlank() || model.isBlank()) {
+      return Map.of();
+    }
+    if (providerName.isBlank() && key.contains(":")) {
+      providerName = key.substring(0, key.indexOf(':'));
+    }
+    var protocol = stringValue(raw.get("protocol")).trim();
+    if (protocol.isBlank()) {
+      protocol = "openai";
+    }
+    var normalized = new LinkedHashMap<String, Object>();
+    normalized.put("name", key);
+    normalized.put("key", key);
+    normalized.put("providerName", providerName);
+    normalized.put("model", model);
+    normalized.put("protocol", protocol);
+    var contextWindow = intValue(raw.get("contextWindow"));
+    if (contextWindow > 0) {
+      normalized.put("contextWindow", contextWindow);
+    }
+    return Map.copyOf(normalized);
+  }
+
+  private Map<String, Object> normalizedModelProviderStatus(Map<String, Object> raw) {
+    var name = stringValue(raw.get("name")).trim();
+    if (name.isBlank()) {
+      return Map.of();
+    }
+    var normalized = new LinkedHashMap<String, Object>();
+    normalized.put("name", name);
+    var protocol = stringValue(raw.get("protocol")).trim();
+    if (!protocol.isBlank()) {
+      normalized.put("protocol", protocol);
+    }
+    var status = stringValue(raw.get("status")).trim();
+    normalized.put("status", status.isBlank() ? "unknown" : status);
+    var error = stringValue(raw.get("error")).trim();
+    if (!error.isBlank()) {
+      normalized.put("error", error);
+    }
+    return Map.copyOf(normalized);
+  }
+
+  private Map<String, Object> normalizedSkillInventory(Map<String, Object> previous, Map<String, Object> incoming) {
+    var source = incoming == null ? Map.<String, Object>of() : incoming;
+    var projectRoot = normalizeSkillInventoryRoot(source.get("projectRoot"));
+    var project = listValue(source.get("project"));
+    var global = listValue(source.get("global"));
+    var projectsByRoot = skillProjectsByRoot(previous.get("projectsByRoot"));
+    if (!projectRoot.isBlank()) {
+      projectsByRoot.put(projectRoot, project);
+    }
+
+    var normalized = new LinkedHashMap<String, Object>();
+    normalized.put("projectRoot", projectRoot);
+    normalized.put("project", project);
+    normalized.put("global", global);
+    normalized.put("projectsByRoot", projectsByRoot);
+    return Map.copyOf(normalized);
+  }
+
+  private Map<String, List<Object>> skillProjectsByRoot(Object value) {
+    var projectsByRoot = new LinkedHashMap<String, List<Object>>();
+    if (value instanceof Map<?, ?> map) {
+      map.forEach((key, projectSkills) -> {
+        var root = normalizeSkillInventoryRoot(key);
+        if (!root.isBlank()) {
+          projectsByRoot.put(root, listValue(projectSkills));
+        }
+      });
+    }
+    return projectsByRoot;
+  }
+
+  private List<Object> projectSkillsForRoot(Map<String, Object> inventory, String projectRoot) {
+    var normalizedRoot = normalizeSkillInventoryRoot(projectRoot);
+    if (normalizedRoot.isBlank()) {
+      return List.of();
+    }
+    var projectsByRoot = skillProjectsByRoot(inventory.get("projectsByRoot"));
+    if (projectsByRoot.containsKey(normalizedRoot)) {
+      return projectsByRoot.get(normalizedRoot);
+    }
+    if (normalizedRoot.equals(normalizeSkillInventoryRoot(inventory.get("projectRoot")))) {
+      return listValue(inventory.get("project"));
+    }
+    return List.of();
+  }
+
+  private String normalizeSkillInventoryRoot(Object value) {
+    var normalized = stringValue(value).trim().replace('\\', '/');
+    if (normalized.equals("~") || normalized.startsWith("~/")) {
+      var home = System.getProperty("user.home", "").trim().replace('\\', '/');
+      if (!home.isBlank()) {
+        normalized = normalized.equals("~") ? home : home + normalized.substring(1);
+      }
+    }
+    while (normalized.length() > 1 && normalized.endsWith("/")) {
+      normalized = normalized.substring(0, normalized.length() - 1);
+    }
+    return normalized;
+  }
+
   private List<Object> listValue(Object value) {
     if (value instanceof List<?> list) {
       return List.copyOf(list);
@@ -2222,6 +2889,186 @@ public class BrainxState {
         .map(ClientDaemonRecord::id)
         .findFirst()
         .orElseThrow(() -> new StateConflictException("No active client daemon is available for this workspace."));
+  }
+
+  private String resolveClientDaemonId(String workspaceId, String clientDaemonId) {
+    var normalized = clientDaemonId == null ? "" : clientDaemonId.trim();
+    if (!normalized.isBlank()) {
+      var daemon = requireDaemon(normalized);
+      if (!daemonCanAccessWorkspace(daemon, workspaceId)) {
+        throw new ForbiddenException("Client daemon cannot access this workspace.");
+      }
+      return daemon.id();
+    }
+    return daemons.values().stream()
+        .filter(daemon -> "active".equals(daemon.status()))
+        .filter(daemon -> daemon.userId() != null && !daemon.userId().isBlank())
+        .filter(daemon -> daemonCanAccessWorkspace(daemon, workspaceId))
+        .map(ClientDaemonRecord::id)
+        .findFirst()
+        .orElse("");
+  }
+
+  private String clientNameForDaemon(String clientDaemonId, String fallback) {
+    if (clientDaemonId == null || clientDaemonId.isBlank()) {
+      return fallback == null || fallback.isBlank() ? "current device" : fallback;
+    }
+    var daemon = daemons.get(clientDaemonId);
+    return daemon == null || daemon.deviceName().isBlank() ? clientDaemonId : daemon.deviceName();
+  }
+
+  private Map<String, Object> agentProfile(AgentRecord agent) {
+    var activeRunCount = runs.values().stream()
+        .filter(run -> agent.id().equals(run.agentId()))
+        .filter(run -> isActiveRunStatus(run.status()))
+        .count();
+    var lastRunId = runs.values().stream()
+        .filter(run -> agent.id().equals(run.agentId()))
+        .reduce((first, second) -> second)
+        .map(RunRecord::id)
+        .orElse("");
+    return Map.of(
+        "id", agent.id(),
+        "name", agent.name(),
+        "summary", "Local brainx agent",
+        "status", activeRunCount > 0 ? "running" : agent.status(),
+        "activeRunCount", activeRunCount,
+        "lastRunId", lastRunId,
+        "capabilities", List.of("agent.loop", "model.invoke", "tool.invoke"),
+        "memoryPolicy", "session"
+    );
+  }
+
+  private Map<String, Object> runSummary(RunRecord run) {
+    var agent = agents.get(run.agentId());
+    var branch = branches.get(run.branchId());
+    return Map.of(
+        "id", run.id(),
+        "agentId", run.agentId(),
+        "agentName", agent == null ? run.agentId() : agent.name(),
+        "branchName", branch == null ? "main" : branch.name(),
+        "status", run.status(),
+        "updatedAt", run.createdAt().toString()
+    );
+  }
+
+  private Map<String, Object> branchSummary(BranchRecord branch) {
+    var agent = agents.get(branch.agentId());
+    return Map.of(
+        "id", branch.id(),
+        "name", branch.name(),
+        "status", branch.status(),
+        "sourceAgent", agent == null ? "brainx" : agent.name(),
+        "pendingApprovals", 0,
+        "adoptionReady", false,
+        "adoptionRiskSummary", branch.description().isBlank() ? "No branch review has been recorded." : branch.description()
+    );
+  }
+
+  private Map<String, Object> clientDaemonView(ClientDaemonRecord daemon) {
+    var now = Instant.now();
+    var lastHeartbeatSeconds = daemon.lastHeartbeatAt() == null ? 0 : Math.max(0, ChronoUnit.SECONDS.between(daemon.lastHeartbeatAt(), now));
+    var activeTasks = executionRequests.values().stream()
+        .filter(request -> daemon.id().equals(request.clientDaemonId()))
+        .filter(request -> "pending".equals(request.status()) || "waiting_for_approval".equals(request.status()))
+        .count();
+    var view = new LinkedHashMap<String, Object>();
+    view.put("id", daemon.id());
+    view.put("workspaceId", daemon.workspaceId());
+    view.put("userId", daemon.userId() == null ? "" : daemon.userId());
+    view.put("name", daemon.deviceName());
+    view.put("deviceName", daemon.deviceName());
+    view.put("os", stringValue(daemon.operatingSystem()));
+    view.put("status", daemon.status());
+    view.put("version", "0.1.0");
+    view.put("activeTasks", activeTasks);
+    view.put("lastHeartbeatSeconds", lastHeartbeatSeconds);
+    view.put("note", String.join(", ", daemon.capabilities()));
+    view.put("registeredAt", daemon.lastHeartbeatAt() == null ? "" : daemon.lastHeartbeatAt().toString());
+    view.put("boundAt", daemon.boundAt() == null ? "" : daemon.boundAt().toString());
+    view.put("lastHeartbeatAt", daemon.lastHeartbeatAt() == null ? "" : daemon.lastHeartbeatAt().toString());
+    view.put("workspacePath", "");
+    view.put("capabilities", daemon.capabilities());
+    return Map.copyOf(view);
+  }
+
+  private List<ExecutionEventRecord> recentWorkspaceEvents(String workspaceId, int limit) {
+    return executionEvents.values().stream()
+        .flatMap(List::stream)
+        .filter(event -> {
+          var run = runs.get(event.runId());
+          return run != null && workspaceId.equals(run.workspaceId());
+        })
+        .sorted((left, right) -> right.occurredAt().compareTo(left.occurredAt()))
+        .limit(Math.max(0, limit))
+        .toList();
+  }
+
+  private Map<String, Object> dashboardStats(String workspaceId, List<ChatSessionRecord> sessions) {
+    var modelTotals = tokenUsageTotalsByWorkspaceAndModel.getOrDefault(workspaceId, Map.of());
+    var byModel = modelTotals.entrySet().stream()
+        .map(entry -> Map.<String, Object>of("modelName", entry.getKey(), "totalTokens", entry.getValue()))
+        .toList();
+    var totalTokens = modelTotals.values().stream().mapToInt(Integer::intValue).sum();
+    var runningByClient = daemons.values().stream()
+        .filter(daemon -> daemonCanAccessWorkspace(daemon, workspaceId))
+        .map(daemon -> Map.<String, Object>of(
+            "clientDaemonId", daemon.id(),
+            "clientName", daemon.deviceName(),
+            "runningSessions", sessions.stream()
+                .filter(session -> daemon.id().equals(session.clientDaemonId()))
+                .filter(session -> isActiveRunStatus(session.runStatus()))
+                .count()
+        ))
+        .toList();
+    var agentWorkStatus = sessions.stream()
+        .sorted((left, right) -> right.updatedAt().compareTo(left.updatedAt()))
+        .limit(6)
+        .map(this::agentWorkStatusView)
+        .toList();
+    return Map.of(
+        "tokenUsage", Map.of("total", totalTokens, "byModel", byModel),
+        "runningByClient", runningByClient,
+        "agentWorkStatus", agentWorkStatus
+    );
+  }
+
+  private Map<String, Object> agentWorkStatusView(ChatSessionRecord session) {
+    var daemon = Optional.ofNullable(daemons.get(session.clientDaemonId()));
+    var view = new LinkedHashMap<String, Object>();
+    view.put("sessionId", session.id());
+    view.put("title", titleOrDefault(session.title()));
+    view.put("clientDaemonId", session.clientDaemonId() == null ? "" : session.clientDaemonId());
+    view.put("clientName", stringValue(daemon.map(ClientDaemonRecord::deviceName).orElse(session.clientName())));
+    view.put("runStatus", session.runStatus());
+    view.put("updatedAt", session.updatedAt().toString());
+    view.put("latestOutput", latestSessionOutput(session));
+    view.put("contextBudget", contextBudgetForSession(session));
+    return Map.copyOf(view);
+  }
+
+  private String titleOrDefault(String title) {
+    var normalized = title == null ? "" : title.trim();
+    return normalized.isBlank() ? "新的会话" : normalized;
+  }
+
+  private String latestSessionOutput(ChatSessionRecord session) {
+    for (int index = session.messages().size() - 1; index >= 0; index--) {
+      var message = session.messages().get(index);
+      var role = stringValue(message.get("role"));
+      if ("system".equals(role) || "tool".equals(role)) {
+        continue;
+      }
+      var content = stringValue(message.get("content")).trim();
+      if (!content.isBlank()) {
+        return content.length() > 180 ? content.substring(0, 180).trim() + "..." : content;
+      }
+      var toolCalls = toolCallsFromMessage(message);
+      if (!toolCalls.isEmpty()) {
+        return "Tool call: " + stringValue(toolCalls.get(0).get("name"));
+      }
+    }
+    return "";
   }
 
   private String ensureSkillReviewRun(String workspaceId) {
@@ -2260,7 +3107,11 @@ public class BrainxState {
     if (proposalId != null && skillProposals.containsKey(proposalId)) {
       var proposal = skillProposals.get(proposalId);
       var status = "completed".equals(result.status()) ? "published" : "apply_failed";
-      skillProposals.put(proposalId, proposal.withStatus(status, Instant.now()));
+      var updated = proposal.withStatus(status, Instant.now());
+      skillProposals.put(proposalId, updated);
+      if ("published".equals(status)) {
+        supersedeDuplicatePendingSkillProposals(updated);
+      }
     }
     recordEvent(
         request.runId(),
@@ -2298,9 +3149,10 @@ public class BrainxState {
         loopIndex,
         toolSelectionMessages(session, tools),
         tools,
-        activeModelName(run.workspaceId()),
+        activeModelName(session),
         session.currentWorkspace()
     );
+    finalModelRequest = finalModelRequest.assignedTo(session.clientDaemonId());
     executionRequests.put(finalModelRequest.executionId(), finalModelRequest);
     recordStep(run.id(), "execution_request", "waiting_for_client", finalModelRequest.executionId());
     recordEvent(
@@ -2327,9 +3179,10 @@ public class BrainxState {
         loopIndex,
         agentLoopMessages(session),
         List.of(),
-        activeModelName(run.workspaceId()),
+        activeModelName(session),
         session.currentWorkspace()
     );
+    execution = execution.assignedTo(session.clientDaemonId());
     executionRequests.put(execution.executionId(), execution);
     recordStep(run.id(), "execution_request", "waiting_for_client", execution.executionId());
     recordEvent(
@@ -2685,20 +3538,22 @@ public class BrainxState {
     return session.withResponseState(
         toolStatesForSession(session),
         contextBudgetForSession(session),
-        availableModels(session.workspaceId()),
-        activeModelName(session.workspaceId())
+        availableModelsForSession(session),
+        activeModelName(session)
     );
   }
 
   private Map<String, Object> contextBudgetForSession(ChatSessionRecord session) {
     var estimatedTokens = estimateTokens(toolSelectionMessages(session, toolsForConversation(session)));
-    var maxTokens = contextWindowForWorkspace(session.workspaceId());
+    var contextWindow = contextWindowForSession(session);
+    var maxTokens = contextWindow.maxTokens();
     var thresholdTokens = (int) Math.round(maxTokens * 0.75);
     var usage = lastTokenUsageByWorkspace.getOrDefault(session.workspaceId(), Map.of());
     return Map.of(
         "messageCount", session.messages().size(),
         "estimatedTokens", estimatedTokens,
         "maxTokens", maxTokens,
+        "contextWindowKnown", contextWindow.known(),
         "thresholdTokens", thresholdTokens,
         "usageRatio", Math.min(1.0, estimatedTokens / (double) maxTokens),
         "lastUsage", usage
@@ -2706,21 +3561,70 @@ public class BrainxState {
   }
 
   private int estimateTokens(List<Map<String, Object>> messages) {
-    var characters = 0;
+    var tokenUnits = 0;
     for (var message : messages) {
-      characters += jsonString(message).length();
+      tokenUnits += estimateTokenUnits(message);
     }
-    return Math.max(1, (int) Math.ceil(characters / 4.0));
+    return Math.max(1, (int) Math.ceil(tokenUnits / 4.0));
   }
 
-  private int contextWindowForWorkspace(String workspaceId) {
-    for (var model : availableModels(workspaceId)) {
-      if (activeModelName(workspaceId).equals(stringValue(model.get("name")))) {
+  private int estimateTokenUnits(Object value) {
+    if (value == null) {
+      return 0;
+    }
+    if (value instanceof String text) {
+      if (text.startsWith("data:image/")) {
+        return 2_000;
+      }
+      return text.length();
+    }
+    if (value instanceof Number || value instanceof Boolean) {
+      return String.valueOf(value).length();
+    }
+    if (value instanceof Map<?, ?> map) {
+      var total = 0;
+      for (var entry : map.entrySet()) {
+        var key = String.valueOf(entry.getKey());
+        if ("dataUrl".equals(key) && stringValue(entry.getValue()).startsWith("data:image/")) {
+          total += 2_000;
+          continue;
+        }
+        total += key.length();
+        total += estimateTokenUnits(entry.getValue());
+      }
+      return total;
+    }
+    if (value instanceof List<?> list) {
+      var total = 0;
+      for (var item : list) {
+        total += estimateTokenUnits(item);
+      }
+      return total;
+    }
+    return jsonString(value).length();
+  }
+
+  private ContextWindowBudget contextWindowForSession(ChatSessionRecord session) {
+    for (var model : availableModelsForSession(session)) {
+      if (activeModelName(session).equals(stringValue(model.get("name")))) {
         var contextWindow = intValue(model.get("contextWindow"));
-        return contextWindow > 0 ? contextWindow : DEFAULT_CONTEXT_WINDOW;
+        return contextWindow > 0
+            ? new ContextWindowBudget(contextWindow, true)
+            : new ContextWindowBudget(DEFAULT_CONTEXT_WINDOW, false);
       }
     }
-    return DEFAULT_CONTEXT_WINDOW;
+    return new ContextWindowBudget(DEFAULT_CONTEXT_WINDOW, false);
+  }
+
+  private List<Map<String, Object>> availableModelsForSession(ChatSessionRecord session) {
+    var daemonId = modelCatalogDaemonIdForSession(session);
+    if (!daemonId.isBlank()) {
+      var catalogModels = asMapList(modelCatalogByDaemon.getOrDefault(daemonId, Map.of()).get("models"));
+      if (!catalogModels.isEmpty()) {
+        return catalogModels;
+      }
+    }
+    return availableModels(session.workspaceId());
   }
 
   private List<Map<String, Object>> availableModels(String workspaceId) {
@@ -2731,21 +3635,101 @@ public class BrainxState {
     return List.of(
         Map.of(
             "name", DEFAULT_MODEL_NAME,
+            "key", DEFAULT_MODEL_NAME,
+            "providerName", "nvidia",
             "model", "stepfun-ai/step-3.7-flash",
-            "protocol", "openai",
-            "contextWindow", DEFAULT_CONTEXT_WINDOW
+            "protocol", "openai"
         ),
         Map.of(
-            "name", "gpt-5.5",
+            "name", "gpt:gpt-5.5",
+            "key", "gpt:gpt-5.5",
+            "providerName", "gpt",
             "model", "gpt-5.5",
-            "protocol", "openai",
-            "contextWindow", DEFAULT_CONTEXT_WINDOW
+            "protocol", "openai"
         )
     );
   }
 
+  private String modelCatalogDaemonIdForSession(ChatSessionRecord session) {
+    var explicit = stringValue(session.clientDaemonId()).trim();
+    if (!explicit.isBlank()) {
+      return explicit;
+    }
+    return daemons.values().stream()
+        .filter(daemon -> "active".equals(daemon.status()))
+        .filter(daemon -> daemonCanAccessWorkspace(daemon, session.workspaceId()))
+        .map(ClientDaemonRecord::id)
+        .filter(daemonId -> !asMapList(modelCatalogByDaemon.getOrDefault(daemonId, Map.of()).get("models")).isEmpty())
+        .findFirst()
+        .orElse("");
+  }
+
   private String activeModelName(String workspaceId) {
     return activeModelNamesByWorkspace.getOrDefault(workspaceId, DEFAULT_MODEL_NAME);
+  }
+
+  private String activeModelName(ChatSessionRecord session) {
+    var configured = activeModelName(session.workspaceId());
+    var models = availableModelsForSession(session);
+    var exact = modelNameByNameOrKey(models, configured);
+    if (!exact.isBlank()) {
+      return exact;
+    }
+    var migrated = modelNameByModelId(models, configured);
+    if (!migrated.isBlank()) {
+      return migrated;
+    }
+    var defaultModel = modelNameByNameOrKey(models, DEFAULT_MODEL_NAME);
+    if (!defaultModel.isBlank()) {
+      return defaultModel;
+    }
+    var defaultModelId = modelNameByModelId(models, "stepfun-ai/step-3.7-flash");
+    if (!defaultModelId.isBlank()) {
+      return defaultModelId;
+    }
+    return models.stream()
+        .map(this::displayModelName)
+        .filter(name -> !name.isBlank())
+        .findFirst()
+        .orElse(DEFAULT_MODEL_NAME);
+  }
+
+  private String modelNameByNameOrKey(List<Map<String, Object>> models, String configured) {
+    var normalized = stringValue(configured).trim();
+    if (normalized.isBlank()) {
+      return "";
+    }
+    return models.stream()
+        .filter(model -> normalized.equals(stringValue(model.get("name"))) || normalized.equals(stringValue(model.get("key"))))
+        .map(this::displayModelName)
+        .filter(name -> !name.isBlank())
+        .findFirst()
+        .orElse("");
+  }
+
+  private String modelNameByModelId(List<Map<String, Object>> models, String configured) {
+    var normalized = stringValue(configured).trim();
+    if (normalized.isBlank() || normalized.contains(":")) {
+      return "";
+    }
+    if ("nvidia-step".equals(normalized)) {
+      normalized = "stepfun-ai/step-3.7-flash";
+    }
+    var modelId = normalized;
+    return models.stream()
+        .filter(model -> modelId.equals(stringValue(model.get("model"))))
+        .map(this::displayModelName)
+        .filter(name -> !name.isBlank())
+        .findFirst()
+        .orElse("");
+  }
+
+  private String displayModelName(Map<String, Object> model) {
+    var name = stringValue(model.get("name")).trim();
+    if (!name.isBlank()) {
+      return name;
+    }
+    return stringValue(model.get("key")).trim();
   }
 
   private Map<String, Map<String, Object>> toolStatesForSession(ChatSessionRecord session) {
@@ -3094,12 +4078,17 @@ public class BrainxState {
         ),
         toolSchema(
             "web_search",
-            "Return mock web search results for a query. Current implementation is a local mock and does not perform real network search.",
+            "Search the public web through Tavily for current facts, documentation, news, or external references that are not available in the workspace.",
             objectSchema(Map.of(
                 "query", Map.of("type", "string"),
-                "domains", Map.of("type", "array", "items", Map.of("type", "string")),
-                "recencyDays", Map.of("type", "integer", "minimum", 1),
-                "maxResults", Map.of("type", "integer", "minimum", 1)
+                "searchDepth", Map.of("type", "string", "enum", List.of("basic", "advanced")),
+                "topic", Map.of("type", "string", "enum", List.of("general", "news", "finance")),
+                "includeDomains", Map.of("type", "array", "items", Map.of("type", "string")),
+                "excludeDomains", Map.of("type", "array", "items", Map.of("type", "string")),
+                "days", Map.of("type", "integer", "minimum", 1, "maximum", 30),
+                "includeAnswer", Map.of("type", "boolean"),
+                "includeRawContent", Map.of("type", "boolean"),
+                "maxResults", Map.of("type", "integer", "minimum", 1, "maximum", 10)
             ), List.of("query"))
         )
     );
@@ -3457,6 +4446,7 @@ public class BrainxState {
         chatId,
         null,
         workspaceId,
+        "",
         workspaceName,
         DEFAULT_CURRENT_WORKSPACE,
         agent.id(),
@@ -3496,6 +4486,7 @@ public class BrainxState {
         DEV_CHAT_SESSION_ID,
         null,
         DEV_WORKSPACE_ID,
+        "",
         "Brainx Local",
         DEFAULT_CURRENT_WORKSPACE,
         DEV_AGENT_ID,

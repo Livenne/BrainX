@@ -27,9 +27,10 @@ class AuthAndBindingFlowTest {
   void clientDaemonCanCreateBindCodeWithoutLoginAndBrowserCompletesBind() throws Exception {
     String browserToken = register("user_a", "pw-a-12345");
     JsonNode registeredDaemon = postJson("/api/v1/client-daemons/register", """
-      {"workspaceId":"w_core","deviceName":"devbox","capabilities":["model.invoke","agent.loop"]}
+      {"workspaceId":"w_core","deviceName":"devbox","installationId":"install-devbox","capabilities":["model.invoke","agent.loop"]}
       """);
     String daemonId = registeredDaemon.get("id").asText();
+    String clientToken = registeredDaemon.get("clientToken").asText();
 
     JsonNode codeResponse = postJson("/api/v1/client-daemons/" + daemonId + "/bind-code", "{}");
     JsonNode bound = postJson(
@@ -42,10 +43,29 @@ class AuthAndBindingFlowTest {
 
     assertThat(bound.get("id").asText()).isEqualTo(daemonId);
     assertThat(bound.get("userId").asText()).isNotBlank();
+    getJson("/api/v1/client-daemons/" + daemonId + "/execution-requests", clientToken);
     postJson("/api/v1/client-daemons/" + daemonId + "/unbind", "{" + quote("confirm") + ":false}", null, status().isBadRequest());
     postJson("/api/v1/client-daemons/" + daemonId + "/unbind", "{" + quote("confirm") + ":true}");
     JsonNode devices = getJson("/api/v1/client-daemons", browserToken);
     assertThat(devices.get(0).get("status").asText()).isEqualTo("revoked");
+  }
+
+  @Test
+  void daemonRegistrationIsStableForSameInstallationAndUnboundDaemonDoesNotReceiveRequests() throws Exception {
+    JsonNode first = postJson("/api/v1/client-daemons/register", """
+      {"workspaceId":"w_core","deviceName":"devbox","installationId":"install-devbox","capabilities":["model.invoke","agent.loop"]}
+      """);
+    JsonNode second = postJson("/api/v1/client-daemons/register", """
+      {"workspaceId":"w_core","deviceName":"devbox renamed","installationId":"install-devbox","capabilities":["model.invoke","agent.loop","tool.invoke"]}
+      """);
+
+    assertThat(second.get("id").asText()).isEqualTo(first.get("id").asText());
+    assertThat(second.get("clientToken").asText()).isEqualTo(first.get("clientToken").asText());
+
+    postJson("/api/v1/workspaces/w_core/chat/messages", """
+      {"content":"查看当前目录","clientDaemonId":"%s"}
+      """.formatted(first.get("id").asText()));
+    getJson("/api/v1/client-daemons/" + first.get("id").asText() + "/execution-requests", first.get("clientToken").asText(), status().isForbidden());
   }
 
   @Test
@@ -97,6 +117,47 @@ class AuthAndBindingFlowTest {
         browserToken,
         status().isConflict()
     );
+  }
+
+  @Test
+  void dashboardReturnsRecentAgentWorkStatusForBoundClients() throws Exception {
+    String browserToken = register("user_dashboard", "pw-dashboard-12345");
+    JsonNode registeredDaemon = postJson("/api/v1/client-daemons/register", """
+      {"workspaceId":"w_core","deviceName":"devbox","operatingSystem":"Linux 6.6.87 x86_64","installationId":"install-dashboard","capabilities":["model.invoke","agent.loop"]}
+      """);
+    String daemonId = registeredDaemon.get("id").asText();
+    JsonNode codeResponse = postJson("/api/v1/client-daemons/" + daemonId + "/bind-code", "{}");
+    postJson(
+        "/api/v1/client-daemons/complete-bind",
+        """
+        {"code":"%s"}
+        """.formatted(codeResponse.get("code").asText()),
+        browserToken
+    );
+    JsonNode session = postJson("/api/v1/workspaces/w_core/chat/sessions", """
+      {"clientDaemonId":"%s","title":"Dashboard task"}
+      """.formatted(daemonId));
+    postJson("/api/v1/workspaces/w_core/chat/sessions/" + session.get("id").asText() + "/messages", """
+      {"content":"开始 dashboard 验证"}
+      """);
+
+    JsonNode dashboard = getJson("/api/v1/workspaces/w_core/dashboard", browserToken);
+    JsonNode workStatus = dashboard.get("stats").get("agentWorkStatus");
+
+    assertThat(workStatus).hasSizeLessThanOrEqualTo(6);
+    assertThat(workStatus.get(0).get("sessionId").asText()).isEqualTo(session.get("id").asText());
+    assertThat(workStatus.get(0).get("title").asText()).isEqualTo("Dashboard task");
+    assertThat(workStatus.get(0).get("clientDaemonId").asText()).isEqualTo(daemonId);
+    assertThat(workStatus.get(0).get("clientName").asText()).isEqualTo("devbox");
+    assertThat(workStatus.get(0).get("runStatus").asText()).isEqualTo("waiting_for_client");
+    assertThat(workStatus.get(0).get("latestOutput").asText()).contains("开始 dashboard 验证");
+    assertThat(workStatus.get(0).get("contextBudget").get("maxTokens").asInt()).isGreaterThan(0);
+
+    JsonNode devices = dashboard.get("daemons");
+    assertThat(devices.get(0).get("name").asText()).isEqualTo("devbox");
+    assertThat(devices.get(0).get("deviceName").asText()).isEqualTo("devbox");
+    assertThat(devices.get(0).get("os").asText()).isEqualTo("Linux 6.6.87 x86_64");
+    assertThat(devices.get(0).get("workspacePath").asText()).isBlank();
   }
 
   @Test

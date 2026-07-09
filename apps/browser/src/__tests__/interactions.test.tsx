@@ -1,5 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AppRoutes } from '../App';
@@ -23,29 +22,11 @@ describe('interaction states', () => {
     await i18n.changeLanguage('en-US');
   });
 
-  it('opens approval evidence in a side panel and submits a decision', async () => {
-    const user = userEvent.setup();
+  it('removes the legacy Approvals route from the workbench', async () => {
     renderAt('/workspaces/w_core/approvals');
 
-    const reviewButtons = await screen.findAllByRole('button', { name: /review/i });
-    await user.click(reviewButtons[0]);
-
-    expect(screen.getByRole('complementary', { name: /approval evidence/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /approve/i })).toBeDisabled();
-
-    await user.type(screen.getByLabelText(/decision reason/i), 'Reviewed scope and evidence');
-    await user.click(screen.getByRole('button', { name: /approve/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/approved/i)).toBeInTheDocument();
-    });
-    expect(screen.getAllByText(/approved/i)).toHaveLength(1);
-    expect(screen.getByRole('button', { name: /approve/i })).toBeDisabled();
-    const pendingQueue = screen.getByRole('heading', { name: /pending queue/i }).closest('section') as HTMLElement;
-    expect(within(pendingQueue).queryByText('Publish skill version')).not.toBeInTheDocument();
-
-    await user.click(screen.getAllByRole('button', { name: /review/i })[0]);
-
-    expect(within(pendingQueue).queryByText('Publish skill version')).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /review/i })).not.toBeInTheDocument();
   });
 });

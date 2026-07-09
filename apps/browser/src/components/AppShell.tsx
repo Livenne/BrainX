@@ -3,8 +3,6 @@ import {
   Bot,
   ChevronLeft,
   ChevronRight,
-  GitBranch,
-  KeyRound,
   LayoutDashboard,
   LogOut,
   MessageSquare,
@@ -12,6 +10,7 @@ import {
   Settings,
   Sparkles
 } from 'lucide-react';
+import { createContext, useContext, useEffect, useState, type DependencyList, type ReactNode } from 'react';
 import { NavLink, Outlet, useLocation, useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useSidebar } from '../state/sidebar';
@@ -19,6 +18,20 @@ import { logoutUser } from '../services/brainxApi';
 import { useAuth } from '../state/auth';
 import { ThemeSwitch } from './ThemeSwitch';
 import './AppShell.css';
+
+const brainxLogoUrl = new URL('../../../../logo.png', import.meta.url).href;
+
+const TopBarSlotContext = createContext<((slot: ReactNode) => void) | null>(null);
+
+export function useTopBarSlot(slot: ReactNode, deps: DependencyList = []) {
+  const setTopBarSlot = useContext(TopBarSlotContext);
+  useEffect(() => {
+    if (!setTopBarSlot) return undefined;
+    setTopBarSlot(slot);
+    return () => setTopBarSlot(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [setTopBarSlot, ...deps]);
+}
 
 function getWorkspaceId(pathname: string, routeParam?: string) {
   if (routeParam) {
@@ -30,13 +43,11 @@ function getWorkspaceId(pathname: string, routeParam?: string) {
 
 function getNavItems(workspaceId: string, t: (key: string) => string) {
   return [
-    { to: `/`, label: t('nav.chat'), icon: MessageSquare, end: true },
+    { to: `/workspaces/${workspaceId}`, label: t('nav.dashboard'), icon: LayoutDashboard, end: true },
+    { to: `/workspaces/${workspaceId}/chat`, label: t('nav.chat'), icon: MessageSquare },
     { to: `/workspaces/${workspaceId}/agents`, label: t('nav.agents'), icon: Bot },
-    { to: `/workspaces/${workspaceId}/branches`, label: t('nav.branches'), icon: GitBranch },
-    { to: `/workspaces/${workspaceId}/approvals`, label: t('nav.approvals'), icon: KeyRound },
     { to: `/workspaces/${workspaceId}/skills`, label: t('nav.skills'), icon: Sparkles },
     { to: `/workspaces/${workspaceId}/client-daemons`, label: t('nav.client'), icon: Activity },
-    { to: `/workspaces/${workspaceId}`, label: t('nav.dashboard'), icon: LayoutDashboard, end: true },
     { to: `/workspaces/${workspaceId}/settings`, label: t('nav.settings'), icon: Settings }
   ];
 }
@@ -44,13 +55,11 @@ function getNavItems(workspaceId: string, t: (key: string) => string) {
 function getPageTitle(pathname: string, workspaceId: string, t: (key: string) => string) {
   const base = `/workspaces/${workspaceId}`;
 
-  if (pathname === '/') return t('nav.chat');
+  if (pathname === '/') return t('nav.dashboard');
   if (pathname === `${base}/chat-preview`) return t('chatPreview.title');
   if (pathname === `${base}/chat`) return t('nav.chat');
   if (pathname.startsWith(`${base}/agents/`) && pathname.includes('/runs/')) return t('runDetail.title');
   if (pathname.startsWith(`${base}/agents`)) return t('nav.agents');
-  if (pathname.startsWith(`${base}/branches`)) return t('nav.branches');
-  if (pathname.startsWith(`${base}/approvals`)) return t('nav.approvals');
   if (pathname.startsWith(`${base}/skills`) || pathname.includes('/skill-drafts/')) return t('skills.title');
   if (pathname.startsWith(`${base}/client-daemons`)) return t('nav.client');
   if (pathname.startsWith(`${base}/settings`)) return t('nav.settings');
@@ -67,6 +76,7 @@ export function AppShell() {
   const navItems = getNavItems(workspaceId, t);
   const toggleLabel = collapsed ? t('nav.expand') : t('nav.collapse');
   const pageTitle = getPageTitle(location.pathname, workspaceId, t);
+  const [topBarSlot, setTopBarSlot] = useState<ReactNode>(null);
 
   async function handleLogout() {
     const token = auth.token;
@@ -83,12 +93,11 @@ export function AppShell() {
     <div className="app-shell full-workbench" data-sidebar-collapsed={collapsed}>
       <aside className="primary-nav" aria-label={t('nav.primary')} data-align={collapsed ? 'center' : 'stretch'} data-collapsed={collapsed}>
         <div className="nav-brand-row">
-          <div className="brand-mark" aria-label="brainx">
-            bx
+          <div className="brand-mark">
+            <img src={brainxLogoUrl} alt="brainx" />
           </div>
           <div className="brand-copy" aria-hidden={collapsed} data-visible={String(!collapsed)} data-testid="brand-copy">
-            <strong>brainx</strong>
-            <span>Session</span>
+            <strong>BrainX</strong>
           </div>
         </div>
         <nav className="nav-stack" aria-label={t('nav.primary')} data-align={collapsed ? 'center' : 'stretch'} data-collapsed={collapsed}>
@@ -124,7 +133,10 @@ export function AppShell() {
       <section className="shell-region">
         <header className="top-bar" role="banner" aria-label={t('topbar.topBar')}>
           <div className="workspace-context">
-            <h1 className="top-page-title">{pageTitle}</h1>
+            <div className="workspace-title-row">
+              <h1 className="top-page-title">{pageTitle}</h1>
+              {topBarSlot ? <div className="top-bar-slot">{topBarSlot}</div> : null}
+            </div>
           </div>
           <div className="top-actions">
             <label className="command-search">
@@ -142,9 +154,11 @@ export function AppShell() {
             </button>
           </div>
         </header>
-        <main className="content-region" data-surface="transparent" key={location.pathname}>
-          <Outlet />
-        </main>
+        <TopBarSlotContext.Provider value={setTopBarSlot}>
+          <main className="content-region" data-surface="transparent" key={location.pathname}>
+            <Outlet />
+          </main>
+        </TopBarSlotContext.Provider>
       </section>
     </div>
   );

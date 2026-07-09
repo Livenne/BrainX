@@ -55,6 +55,11 @@ describe('v0.3 app shell', () => {
 
     const statusBar = await screen.findByRole('banner', { name: 'Top bar' });
     expect(within(statusBar).getByRole('heading', { name: 'Chat' })).toBeInTheDocument();
+    const clientSelector = within(statusBar).getByRole('button', { name: 'Bound client device' });
+    expect(clientSelector).toBeInTheDocument();
+    expect(clientSelector).toHaveClass('top-client-trigger');
+    expect(within(statusBar).getByText('Livenne Workstation')).toBeInTheDocument();
+    expect(within(statusBar).queryByText(/^Client$/)).not.toBeInTheDocument();
     expect(within(statusBar).queryByText('brainx')).not.toBeInTheDocument();
     expect(within(statusBar).queryByText('workspace-core')).not.toBeInTheDocument();
     expect(within(statusBar).queryByText(/frontend-main/)).not.toBeInTheDocument();
@@ -63,6 +68,7 @@ describe('v0.3 app shell', () => {
     expect(within(statusBar).getByRole('searchbox', { name: 'Command search' })).toBeInTheDocument();
     expect(within(statusBar).queryByRole('button', { name: /switch language/i })).not.toBeInTheDocument();
     expect(within(statusBar).queryByText('/workspaces/w_core/chat')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Bound client selector' })).not.toBeInTheDocument();
   });
 
   it('keeps page titles in the top bar instead of duplicating them inside content', async () => {
@@ -71,7 +77,7 @@ describe('v0.3 app shell', () => {
     const statusBar = await screen.findByRole('banner', { name: 'Top bar' });
     const main = screen.getByRole('main');
 
-    expect(await within(main).findByRole('button', { name: 'New agent' })).toBeInTheDocument();
+    expect(await within(main).findByText('Agent management is not open yet')).toBeInTheDocument();
     expect(within(statusBar).getByRole('heading', { name: 'Agents' })).toBeInTheDocument();
     expect(within(main).queryByRole('heading', { name: 'Agents' })).not.toBeInTheDocument();
     expect(within(main).queryByText('Manage forkable workers, memory policy, and run launch context.')).not.toBeInTheDocument();

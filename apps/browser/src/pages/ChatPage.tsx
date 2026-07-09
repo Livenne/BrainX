@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
   AlertCircle,
@@ -27,14 +27,16 @@ import rehypeKatex from 'rehype-katex';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import { useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { PageSkeleton, PendingButton } from '../components/LoadingStates';
+import { useTopBarSlot } from '../components/AppShell';
 import type {
   AgentTodoItem,
   AskUserAnswer,
   BackgroundTerminal,
   ChatAttachmentInput,
+  ClientDaemon,
   ChatMessage,
   ChatSession,
   ChatTimelineNotice,
@@ -53,6 +55,7 @@ import {
   forkChatSession as forkRealChatSession,
   getChatSessionById as getRealChatSessionById,
   getChatSessions as getRealChatSessions,
+  getClientDaemons as getRealClientDaemons,
   getSkillInventory as getRealSkillInventory,
   rejectToolRequest,
   renameChatSession as renameRealChatSession,
@@ -67,6 +70,7 @@ import {
   deleteChatSession as deleteMockChatSession,
   forkChatSession as forkMockChatSession,
   getChatSessions as getMockChatSessions,
+  getClientDaemons as getMockClientDaemons,
   getSkillInventory as getMockSkillInventory,
   renameChatSession as renameMockChatSession,
   sendChatCommand as sendMockChatCommand,
@@ -87,12 +91,32 @@ const activeRunStatuses = new Set<RunStatus>([
   'waiting_for_user',
   'summarizing'
 ]);
+
+type SkillInventoryOptions = {
+  clientDaemonId?: string;
+  currentWorkspace?: string;
+};
+
 const maxAttachmentsPerMessage = 15;
 const maxImageAttachmentBytes = 5 * 1024 * 1024;
 const maxTextAttachmentBytes = 512 * 1024;
 const maxTotalAttachmentBytes = 20 * 1024 * 1024;
 const assistantTypewriterChunkSize = 10;
 const thinkingTypewriterChunkSize = 12;
+const mockDefaultClient: ClientDaemon = {
+  id: 'cd_local',
+  name: 'brainx-client-local',
+  deviceName: 'Livenne Workstation',
+  os: 'Ubuntu 24.04 / WSL',
+  status: 'online',
+  version: '0.1.0',
+  activeTasks: 0,
+  lastHeartbeatSeconds: 0,
+  note: 'Local test client',
+  registeredAt: '2026-07-04T09:24:00Z',
+  workspacePath: '/home/Livenne/code/brainx',
+  capabilities: ['model.invoke', 'agent.loop']
+};
 
 type RenderMode = 'info' | 'file' | 'diff' | 'generic';
 
@@ -337,25 +361,35 @@ const toolRenderRegistry: Record<string, ToolRenderSpec> = {
   }
 };
 
-async function loadChatSessions(workspaceId: string): Promise<ChatSession[]> {
+async function loadChatSessions(workspaceId: string, clientDaemonId?: string): Promise<ChatSession[]> {
   if (useMockChatApi) {
     return getMockChatSessions(workspaceId);
   }
-  return getRealChatSessions(workspaceId);
+  return getRealChatSessions(workspaceId, clientDaemonId);
 }
 
-async function loadSkillInventory(workspaceId: string): Promise<SkillInventory> {
+async function loadSkillInventory(workspaceId: string, options?: SkillInventoryOptions): Promise<SkillInventory> {
   if (useMockChatApi) {
-    return getMockSkillInventory(workspaceId);
+    return getMockSkillInventory(workspaceId, options);
   }
-  return getRealSkillInventory(workspaceId);
+  return getRealSkillInventory(workspaceId, options);
 }
 
-async function createChatSessionShell(workspaceId: string): Promise<ChatSession> {
+async function loadClientDaemons(token?: string | null): Promise<ClientDaemon[]> {
+  if (useMockChatApi) {
+    return getMockClientDaemons();
+  }
+  if (!token) {
+    return [];
+  }
+  return getRealClientDaemons(token);
+}
+
+async function createChatSessionShell(workspaceId: string, clientDaemonId?: string): Promise<ChatSession> {
   if (useMockChatApi) {
     return createMockChatSession(workspaceId);
   }
-  return createRealChatSession(workspaceId);
+  return createRealChatSession(workspaceId, undefined, clientDaemonId);
 }
 
 async function submitChatMessage(
@@ -811,6 +845,10 @@ function fileKind(file: File): ChatAttachmentInput['kind'] {
   return 'file';
 }
 
+export function isUsableChatClient(client: Pick<ClientDaemon, 'status'>) {
+  return client.status === 'active' || client.status === 'online';
+}
+
 function attachmentValidationError(file: File): string | null {
   const kind = fileKind(file);
   if (file.type.startsWith('video/') || file.type.startsWith('audio/') || kind === 'file') {
@@ -1022,9 +1060,24 @@ function deriveTerminalState(session: ChatSession): BackgroundTerminal[] {
 function buildTimeline(messages: ChatMessage[], toolStates: Record<string, ToolState>, notices: ChatTimelineNotice[] = []): TimelineItem[] {
   const results = resultMessagesByCallId(messages);
   const timeline: TimelineItem[] = [];
+  const noticesByMessageIndex = new Map<number, ChatTimelineNotice[]>();
+  for (const notice of notices) {
+    const rawIndex = Number(notice.afterMessageIndex ?? notice.messageIndex ?? 0);
+    const index = Number.isFinite(rawIndex) ? Math.max(0, rawIndex) : messages.length;
+    noticesByMessageIndex.set(index, [...(noticesByMessageIndex.get(index) ?? []), notice]);
+  }
+  const appendNoticesAfter = (index: number) => {
+    for (const notice of noticesByMessageIndex.get(index) ?? []) {
+      timeline.push({ type: 'notice', notice });
+    }
+  };
 
+  let messageIndex = 0;
+  appendNoticesAfter(0);
   for (const message of messages) {
+    messageIndex += 1;
     if (message.role === 'system' || message.role === 'tool') {
+      appendNoticesAfter(messageIndex);
       continue;
     }
     if (message.role === 'user') {
@@ -1036,6 +1089,7 @@ function buildTimeline(messages: ChatMessage[], toolStates: Record<string, ToolS
         status: message.status,
         errorMessage: message.error?.message ? sanitizeChatError(message.error.message) : undefined
       });
+      appendNoticesAfter(messageIndex);
       continue;
     }
     if (message.role === 'assistant') {
@@ -1046,6 +1100,7 @@ function buildTimeline(messages: ChatMessage[], toolStates: Record<string, ToolS
           previousUser.status = 'failed';
           previousUser.errorMessage = sanitizeChatError(content);
         }
+        appendNoticesAfter(messageIndex);
         continue;
       }
       if (content.trim() || message.thinking?.trim()) {
@@ -1065,11 +1120,15 @@ function buildTimeline(messages: ChatMessage[], toolStates: Record<string, ToolS
           spec: toolRenderRegistry[funcName] ?? { ...fallbackSpec, nickname: funcName || fallbackSpec.nickname }
         });
       }
+      appendNoticesAfter(messageIndex);
     }
   }
 
-  for (const notice of notices) {
-    timeline.push({ type: 'notice', notice });
+  const overflowIndexes = Array.from(noticesByMessageIndex.keys())
+    .filter((index) => index > messageIndex)
+    .sort((left, right) => left - right);
+  for (const index of overflowIndexes) {
+    appendNoticesAfter(index);
   }
 
   return timeline;
@@ -1078,7 +1137,6 @@ function buildTimeline(messages: ChatMessage[], toolStates: Record<string, ToolS
 function TimelineNotice({ notice }: { notice: ChatTimelineNotice }) {
   return (
     <article className="timeline-notice-row" data-kind={notice.kind}>
-      <span className="timeline-notice-label">提示上下文</span>
       <span className="timeline-notice-message">{notice.message}</span>
     </article>
   );
@@ -1335,6 +1393,9 @@ function InfoDetails({ item }: { item: ToolTimelineItem }) {
   if (item.funcName === 'run_command') {
     return <CommandOutputDetails value={source} error={error} />;
   }
+  if (item.funcName === 'web_search') {
+    return <WebSearchDetails value={source} error={error} />;
+  }
   if (error) {
     return <TextOutputBlock text={error} tone="error" />;
   }
@@ -1392,6 +1453,21 @@ function CommandOutputDetails({ value, error }: { value: Record<string, unknown>
   return <InfoRows rows={[['exitCode', String(value.exitCode ?? value.status ?? 'completed')]]} />;
 }
 
+function WebSearchDetails({ value, error }: { value: Record<string, unknown>; error?: string | null }) {
+  if (error) return <TextOutputBlock text={error} tone="error" />;
+  const answer = firstString(value.answer);
+  const results = Array.isArray(value.results) ? value.results : [];
+  if (!answer && !results.length) {
+    return <KeyValueDetails value={value} />;
+  }
+  return (
+    <div className="tool-detail-stack web-search-detail">
+      {answer ? <TextOutputBlock text={answer} /> : null}
+      {results.length ? <ResultList items={results} /> : null}
+    </div>
+  );
+}
+
 function TextOutputBlock({ text, tone = 'default' }: { text: string; tone?: 'default' | 'error' }) {
   return (
     <pre className="preview-code-lines command-output-lines tool-text-output" data-tone={tone}>
@@ -1408,10 +1484,17 @@ function ResultList({ items }: { items: unknown[] }) {
       {items.map((item, index) => {
         const record = isRecord(item) ? item : {};
         const title = firstString(record.title) ?? firstString(record.path) ?? `result-${index + 1}`;
-        const detail = firstString(record.snippet) ?? firstString(record.preview) ?? firstString(record.url) ?? '';
+        const detail =
+          firstString(record.content) ??
+          firstString(record.snippet) ??
+          firstString(record.preview) ??
+          firstString(record.url) ??
+          '';
+        const url = firstString(record.url);
         return (
           <div className="tool-result-summary" key={`${title}-${index}`}>
             <strong>{title}</strong>
+            {url ? <small>{url}</small> : null}
             {detail ? <span>{detail}</span> : null}
           </div>
         );
@@ -1541,14 +1624,20 @@ function QueuedInputs({ inputs }: { inputs: NonNullable<ChatSession['queuedInput
   );
 }
 
-function SkillRail({ inventory }: { inventory: SkillInventory }) {
+function ChatRightRail({ inventory, currentWorkspace }: { inventory: SkillInventory; currentWorkspace?: string }) {
   const projectSkills = inventory.project ?? [];
   const globalSkills = inventory.global ?? [];
-  if (!projectSkills.length && !globalSkills.length) return null;
+  if (!currentWorkspace && !projectSkills.length && !globalSkills.length) return null;
   return (
     <aside className="chat-skills-panel" role="region" aria-label="Skills">
-      <h2>Skills</h2>
-      <SkillRailGroup title="Current workspace" skills={projectSkills} />
+      {currentWorkspace ? (
+        <section className="workspace-rail-card" role="region" aria-label="Current working directory">
+          <h2>Workdir</h2>
+          <p>{currentWorkspace}</p>
+        </section>
+      ) : null}
+      {projectSkills.length || globalSkills.length ? <h2>Skills</h2> : null}
+      <SkillRailGroup title="Project skills" skills={projectSkills} />
       <SkillRailGroup title="Global" skills={globalSkills} />
     </aside>
   );
@@ -1575,6 +1664,9 @@ function ContextBudgetDonut({ budget }: { budget: NonNullable<ChatSession['conte
   const ratio = Math.max(0, Math.min(1, budget.usageRatio ?? 0));
   const percent = Math.round(ratio * 100);
   const state = percent >= 92 ? 'danger' : percent >= 75 ? 'warning' : percent >= 45 ? 'ok' : 'idle';
+  const title = budget.contextWindowKnown === false
+    ? `${budget.estimatedTokens} tokens, model context window unknown`
+    : `${budget.estimatedTokens}/${budget.maxTokens} tokens`;
 
   return (
     <div
@@ -1586,7 +1678,7 @@ function ContextBudgetDonut({ budget }: { budget: NonNullable<ChatSession['conte
       data-state={state}
       role="progressbar"
       style={{ '--budget-percent': `${percent}%` } as CSSProperties}
-      title={`${budget.estimatedTokens}/${budget.maxTokens} tokens`}
+      title={title}
     >
       <span>{percent}%</span>
     </div>
@@ -1843,7 +1935,14 @@ function SessionMenu({
                 onKeyDown={(event) => handleOptionKeyDown(event, index)}
                 onMouseEnter={() => setActiveIndex(index)}
               >
-                {option.label}
+                <span className="session-option-content">
+                  <span
+                    className="session-status-light"
+                    data-status={option.session && activeRunStatuses.has(option.session.runStatus) ? 'running' : 'idle'}
+                    aria-hidden="true"
+                  />
+                  <span>{option.label}</span>
+                </span>
               </button>
               {option.session ? (
                 <div className="chat-session-actions">
@@ -1899,6 +1998,11 @@ export function ChatPage() {
   const { t } = useTranslation();
   const auth = useAuth();
   const { workspaceId = 'w_core' } = useParams();
+  const [searchParams] = useSearchParams();
+  const requestedSessionId = searchParams.get('sessionId')?.trim() ?? '';
+  const [clients, setClients] = useState<ClientDaemon[]>(() => (useMockChatApi ? [mockDefaultClient] : []));
+  const [clientsHydrated, setClientsHydrated] = useState(false);
+  const [selectedClientId, setSelectedClientId] = useState(() => (useMockChatApi ? mockDefaultClient.id : ''));
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState('');
   const [message, setMessage] = useState('');
@@ -1913,6 +2017,7 @@ export function ChatPage() {
   const [activeComposerPopover, setActiveComposerPopover] = useState<ComposerPopover>(null);
   const [activeComposerDialog, setActiveComposerDialog] = useState<ComposerDialog>(null);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [topClientMenuOpen, setTopClientMenuOpen] = useState(false);
   const [dialogTargetSessionId, setDialogTargetSessionId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
   const [workdirPath, setWorkdirPath] = useState('');
@@ -1933,12 +2038,68 @@ export function ChatPage() {
 
   useEffect(() => {
     let active = true;
+    loadClientDaemons(auth.token)
+      .then((result) => {
+        if (!active) return;
+        setClients(result);
+        setSelectedClientId((current) => {
+          const currentClient = result.find((client) => client.id === current);
+          if (currentClient && isUsableChatClient(currentClient)) {
+            return current;
+          }
+          return result.find(isUsableChatClient)?.id || '';
+        });
+      })
+      .catch((caught) => {
+        if (active) {
+          const message = errorMessage(caught, 'Failed to load clients');
+          setChatError(message);
+          showToast(message);
+        }
+      })
+      .finally(() => {
+        if (active) setClientsHydrated(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [auth.token]);
+
+  useEffect(() => {
+    let active = true;
+    if (!clientsHydrated) {
+      setLoadingSessions(true);
+      return () => {
+        active = false;
+      };
+    }
+
     setLoadingSessions(true);
-    loadChatSessions(workspaceId)
+    if (clientsHydrated && !clients.some(isUsableChatClient)) {
+      setSessions([]);
+      setSelectedSessionId('');
+      setSessionMenuOpen(true);
+      setLoadingSessions(false);
+      return () => {
+        active = false;
+      };
+    }
+    loadChatSessions(workspaceId, selectedClientId || undefined)
       .then((result) => {
         if (!active) return;
         setSessions(result);
-        setSelectedSessionId('');
+        const lastSessionKey = `brainx.chat.lastSession.${workspaceId}.${selectedClientId || 'default'}`;
+        const newest = [...result].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+        const requested = requestedSessionId && requestedSessionId !== 'new'
+          ? result.find((session) => session.id === requestedSessionId)
+          : null;
+        const rememberedId = globalThis.localStorage?.getItem(lastSessionKey) ?? '';
+        const remembered = rememberedId ? result.find((session) => session.id === rememberedId) : null;
+        const nextSessionId = requestedSessionId === 'new'
+          ? ''
+          : requested?.id ?? remembered?.id ?? newest?.id ?? '';
+        setSelectedSessionId(nextSessionId);
+        setSessionMenuOpen(!nextSessionId);
       })
       .catch((caught) => {
         if (active) {
@@ -1954,11 +2115,30 @@ export function ChatPage() {
     return () => {
       active = false;
     };
-  }, [workspaceId]);
+  }, [clients, clientsHydrated, requestedSessionId, selectedClientId, workspaceId]);
+
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    globalThis.localStorage?.setItem(`brainx.chat.lastSession.${workspaceId}.${selectedClientId || 'default'}`, selectedSessionId);
+  }, [selectedClientId, selectedSessionId, workspaceId]);
+
+  const selectedSession = useMemo(
+    () => sessions.find((session) => session.id === selectedSessionId),
+    [selectedSessionId, sessions]
+  );
 
   useEffect(() => {
     let active = true;
-    loadSkillInventory(workspaceId)
+    if (!selectedSession?.currentWorkspace) {
+      setSkillInventory({ project: [], global: [] });
+      return () => {
+        active = false;
+      };
+    }
+    loadSkillInventory(workspaceId, {
+      clientDaemonId: selectedSession.clientDaemonId || selectedClientId || undefined,
+      currentWorkspace: selectedSession.currentWorkspace
+    })
       .then((inventory) => {
         if (active) setSkillInventory(inventory);
       })
@@ -1968,13 +2148,70 @@ export function ChatPage() {
     return () => {
       active = false;
     };
-  }, [workspaceId]);
-
-  const selectedSession = useMemo(
-    () => sessions.find((session) => session.id === selectedSessionId),
-    [selectedSessionId, sessions]
+  }, [selectedClientId, selectedSession?.clientDaemonId, selectedSession?.currentWorkspace, workspaceId]);
+  const chatClients = useMemo(
+    () => clients.filter(isUsableChatClient),
+    [clients]
   );
+  const noUsableClient = clientsHydrated && chatClients.length === 0;
   const isAgentActive = Boolean(selectedSession && activeRunStatuses.has(selectedSession.runStatus));
+  const topBarClientSelector = useMemo(
+    () => {
+      const selectedClient = chatClients.find((client) => client.id === selectedClientId) ?? chatClients[0];
+      return (
+        <div className="top-client-selector" aria-label="Bound client selector">
+          {selectedClient ? (
+            <>
+              <button
+                aria-expanded={topClientMenuOpen}
+                aria-haspopup="listbox"
+                aria-label="Bound client device"
+                className="top-client-trigger"
+                type="button"
+                onClick={() => setTopClientMenuOpen((open) => !open)}
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setTopClientMenuOpen(true);
+                  }
+                }}
+              >
+                <span>{selectedClient.deviceName || selectedClient.id}</span>
+                <ChevronDown aria-hidden="true" size={14} />
+              </button>
+              {topClientMenuOpen ? (
+                <div className="top-client-menu" role="listbox" aria-label="Bound client devices">
+                  {chatClients.map((client) => (
+                    <button
+                      aria-selected={client.id === selectedClient.id}
+                      className="top-client-option"
+                      key={client.id}
+                      role="option"
+                      type="button"
+                      onClick={() => {
+                        setSelectedClientId(client.id);
+                        setSelectedSessionId('');
+                        setSessionMenuOpen(false);
+                        setTopClientMenuOpen(false);
+                        resetAssistantStream();
+                      }}
+                    >
+                      <span>{client.deviceName || client.id}</span>
+                      {client.os ? <small>{client.os}</small> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <span className="top-client-empty">No bound client</span>
+          )}
+        </div>
+      );
+    },
+    [chatClients, selectedClientId, topClientMenuOpen]
+  );
+  useTopBarSlot(topBarClientSelector, [topBarClientSelector]);
 
   useEffect(
     () => () => {
@@ -2062,6 +2299,19 @@ export function ChatPage() {
     }
     stream.scrollTop = stream.scrollHeight;
   }, [assistantDraft, assistantThinkingDraft, isAgentActive, selectedSession?.id, selectedSession?.messages.length, selectedSession?.queuedInputs?.length]);
+
+  useLayoutEffect(() => {
+    const stream = streamRef.current;
+    if (!stream || !selectedSession?.id) return undefined;
+    const frame = globalThis.requestAnimationFrame(() => {
+      if (typeof stream.scrollTo === 'function') {
+        stream.scrollTo({ top: stream.scrollHeight, behavior: 'auto' });
+        return;
+      }
+      stream.scrollTop = stream.scrollHeight;
+    });
+    return () => globalThis.cancelAnimationFrame(frame);
+  }, [selectedSession?.id]);
 
   useEffect(() => {
     const composer = composerRef.current;
@@ -2238,6 +2488,26 @@ export function ChatPage() {
     };
   }
 
+  function removeFailedUserMessage(session: ChatSession, failedItem: TextTimelineItem): ChatSession {
+    const messages = [...session.messages];
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const candidate = messages[index];
+      if (candidate.role !== 'user') continue;
+      if (messageContentText(candidate.content) !== failedItem.content) continue;
+      const nextMessage = messages[index + 1];
+      const nextIsFailure = nextMessage?.role === 'assistant' && isModelFailureText(nextMessage.content ?? '');
+      if (candidate.status === 'failed' || nextIsFailure || failedItem.status === 'failed') {
+        messages.splice(index, nextIsFailure ? 2 : 1);
+        return {
+          ...session,
+          messages,
+          runStatus: 'completed'
+        };
+      }
+    }
+    return session;
+  }
+
   function resetToEmptyDraft() {
     setSelectedSessionId('');
     setMessage('');
@@ -2245,7 +2515,7 @@ export function ChatPage() {
     setActiveComposerPopover(null);
     setActiveComposerDialog(null);
     setDialogTargetSessionId(null);
-    setSessionMenuOpen(false);
+    setSessionMenuOpen(true);
     setSelectedCommandIndex(0);
     setWorkdirPath('');
     resetAssistantStream();
@@ -2254,8 +2524,12 @@ export function ChatPage() {
   async function ensureSessionForAction(action: ComposerAction): Promise<ChatSession | null> {
     if (action.sessionPolicy === 'none') return selectedSession ?? null;
     if (selectedSession) return selectedSession;
+    if (noUsableClient || !selectedClientId) {
+      showToast('No bound client is selected. Bind a client before starting chat.', 'info');
+      return null;
+    }
 
-    const created = await createChatSessionShell(workspaceId);
+    const created = await createChatSessionShell(workspaceId, selectedClientId || undefined);
     replaceSession(created);
     setSelectedSessionId(created.id);
     return created;
@@ -2296,7 +2570,7 @@ export function ChatPage() {
         replaceSession(await renameChatSessionShell(workspaceId, targetSession.id, title));
       } else if (command === 'delete') {
         await deleteChatSessionShell(workspaceId, targetSession.id);
-        const nextSessions = await loadChatSessions(workspaceId);
+        const nextSessions = await loadChatSessions(workspaceId, selectedClientId || undefined);
         setSessions(nextSessions);
         setSelectedSessionId('');
       } else {
@@ -2419,17 +2693,21 @@ export function ChatPage() {
     void executeComposerAction(item, rest ? `/${item.command ?? item.id} ${rest}` : item.label);
   }
 
-  async function sendPreparedMessage(content: string, attachmentInputs: ChatAttachmentInput[]) {
+  async function sendPreparedMessage(content: string, attachmentInputs: ChatAttachmentInput[], sessionOverride?: ChatSession) {
     if ((!content.trim() && attachmentInputs.length === 0) || sending) return;
 
     setSending(true);
     setChatError(null);
-    let sessionForSend = selectedSession;
+    let sessionForSend = sessionOverride ?? selectedSession;
     let optimisticSession: ChatSession | null = null;
 
     try {
+      if (noUsableClient || !selectedClientId) {
+        showToast('No bound client is selected. Bind a client before starting chat.', 'info');
+        return;
+      }
       if (!sessionForSend) {
-        sessionForSend = await createChatSessionShell(workspaceId);
+        sessionForSend = await createChatSessionShell(workspaceId, selectedClientId || undefined);
         replaceSession(sessionForSend);
         setSelectedSessionId(sessionForSend.id);
       }
@@ -2491,7 +2769,11 @@ export function ChatPage() {
   }
 
   async function handleRetryMessage(item: TextTimelineItem) {
-    await sendPreparedMessage(item.content, item.attachments ?? []);
+    const cleaned = selectedSession ? removeFailedUserMessage(selectedSession, item) : null;
+    if (cleaned) {
+      replaceSession(cleaned);
+    }
+    await sendPreparedMessage(item.content, item.attachments ?? [], cleaned ?? undefined);
   }
 
   async function selectModel(modelName: string) {
@@ -2502,8 +2784,8 @@ export function ChatPage() {
       const menuSessionId = modelMenuSessionIdRef.current;
       const menuSession = menuSessionId ? sessions.find((session) => session.id === menuSessionId) : null;
       const targetSession = menuSessionId === ''
-        ? await createChatSessionShell(workspaceId)
-        : menuSession ?? selectedSession ?? (await createChatSessionShell(workspaceId));
+        ? await createChatSessionShell(workspaceId, selectedClientId || undefined)
+        : menuSession ?? selectedSession ?? (await createChatSessionShell(workspaceId, selectedClientId || undefined));
       if (!selectedSession || targetSession.id !== selectedSession.id) {
         replaceSession(targetSession);
         setSelectedSessionId(targetSession.id);
@@ -2530,7 +2812,7 @@ export function ChatPage() {
     try {
       const targetSession = dialogTargetSessionId
         ? sessions.find((session) => session.id === dialogTargetSessionId)
-        : selectedSession ?? (await createChatSessionShell(workspaceId));
+        : selectedSession ?? (await createChatSessionShell(workspaceId, selectedClientId || undefined));
       if (!targetSession) {
         showToast('Session was not found.');
         return;
@@ -2558,7 +2840,7 @@ export function ChatPage() {
     setSending(true);
     setChatError(null);
     try {
-      const targetSession = selectedSession ?? (await createChatSessionShell(workspaceId));
+      const targetSession = selectedSession ?? (await createChatSessionShell(workspaceId, selectedClientId || undefined));
       replaceSession(targetSession);
       const updated = await submitChatCommand(workspaceId, 'workspace', { path }, targetSession.id);
       replaceSession(updated);
@@ -2583,7 +2865,7 @@ export function ChatPage() {
     setChatError(null);
     try {
       await deleteChatSessionShell(workspaceId, targetSession.id);
-      const nextSessions = await loadChatSessions(workspaceId);
+      const nextSessions = await loadChatSessions(workspaceId, selectedClientId || undefined);
       setSessions(nextSessions);
       if (targetSession.id === selectedSession?.id) {
         setSelectedSessionId('');
@@ -2703,7 +2985,8 @@ export function ChatPage() {
         estimatedTokens: 0,
         maxTokens: 128000,
         thresholdTokens: 96000,
-        usageRatio: 0
+        usageRatio: 0,
+        contextWindowKnown: false
       }
     : null;
   const timelineWithDraft: TimelineItem[] = assistantDraft || assistantThinkingDraft
@@ -2713,7 +2996,7 @@ export function ChatPage() {
   const derivedTodos = selectedSession ? deriveTodoState(selectedSession) : [];
   const derivedTerminals = selectedSession ? deriveTerminalState(selectedSession) : [];
   const modelOptions = selectedSession?.availableModels ?? sessions.find((session) => session.availableModels?.length)?.availableModels ?? [];
-  const currentModelName = selectedSession?.activeModelName ?? modelOptions[0]?.name ?? 'nvidia-step';
+  const currentModelName = selectedSession?.activeModelName ?? modelOptions[0]?.name ?? 'nvidia:stepfun-ai/step-3.7-flash';
   const hasSidePanel = true;
 
   return (
@@ -2728,27 +3011,30 @@ export function ChatPage() {
         </div>
       ) : null}
       <aside className="chat-state-panel" aria-label="Session state">
-        <SessionMenu
-          sessions={sessions}
-          selectedSessionId={selectedSessionId}
-          open={sessionMenuOpen}
-          onOpenChange={setSessionMenuOpen}
-          onSelect={(sessionId) => {
-            setSelectedSessionId(sessionId);
-            resetAssistantStream();
-          }}
-          onRename={(session) => {
-            setDialogTargetSessionId(session.id);
-            setRenameTitle(session.title || '新的会话');
-            setActiveComposerDialog('rename');
-            setSessionMenuOpen(false);
-          }}
-          onDelete={(session) => {
-            setDialogTargetSessionId(session.id);
-            setActiveComposerDialog('delete');
-            setSessionMenuOpen(false);
-          }}
-        />
+        <section className="chat-rail-section chat-session-section" aria-label="Session section">
+          <h2>Session</h2>
+          <SessionMenu
+            sessions={sessions}
+            selectedSessionId={selectedSessionId}
+            open={sessionMenuOpen}
+            onOpenChange={setSessionMenuOpen}
+            onSelect={(sessionId) => {
+              setSelectedSessionId(sessionId);
+              resetAssistantStream();
+            }}
+            onRename={(session) => {
+              setDialogTargetSessionId(session.id);
+              setRenameTitle(session.title || '新的会话');
+              setActiveComposerDialog('rename');
+              setSessionMenuOpen(false);
+            }}
+            onDelete={(session) => {
+              setDialogTargetSessionId(session.id);
+              setActiveComposerDialog('delete');
+              setSessionMenuOpen(false);
+            }}
+          />
+        </section>
         {derivedTodos.length ? (
           <section className="chat-rail-section" aria-label="Todo section">
             <h2>Todo</h2>
@@ -2787,7 +3073,17 @@ export function ChatPage() {
         ) : null}
       </aside>
       <main className={`low-density-chat${isEmptyDraft ? ' empty-chat-shell' : ''}`} aria-label="Timeline workspace">
-        {isEmptyDraft ? (
+        {noUsableClient ? (
+          <section className="chat-empty-state chat-empty-state-centered chat-no-client-state" aria-label="No bound client">
+            <div className="chat-empty-copy">
+              <h1 className="chat-empty-display-title">Bind a client to start chat</h1>
+              <p>Connect a local brainx client before creating sessions or sending agent work.</p>
+            </div>
+            <Link className="primary-action no-client-link" to={`/workspaces/${workspaceId}/client-daemons`}>
+              Open Client page
+            </Link>
+          </section>
+        ) : isEmptyDraft ? (
           <section className="chat-empty-state chat-empty-state-centered" aria-label="Empty chat">
             <div className="chat-empty-copy">
               <h1 className="chat-empty-display-title">What should brainx work on?</h1>
@@ -3065,7 +3361,8 @@ export function ChatPage() {
               <PendingButton
                 aria-label={t('chat.sendMessage')}
                 className="send-preview-button composer-send-button"
-                disabled={(!message.trim() && attachments.length === 0) || sending}
+                disabled={noUsableClient || (!message.trim() && attachments.length === 0) || sending}
+                aria-disabled={noUsableClient}
                 pending={sending}
                 type="submit"
               >
@@ -3075,7 +3372,7 @@ export function ChatPage() {
           </div>
         </form>
       </main>
-      <SkillRail inventory={skillInventory} />
+      <ChatRightRail inventory={skillInventory} currentWorkspace={selectedSession?.currentWorkspace} />
     </section>
   );
 }

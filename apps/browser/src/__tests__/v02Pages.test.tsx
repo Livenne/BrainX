@@ -18,12 +18,14 @@ function renderAt(path: string) {
 }
 
 describe('v0.2 page content depth', () => {
-  it('renders a real agents page instead of a placeholder', async () => {
+  it('marks the agents page as planned instead of exposing mock controls', async () => {
     renderAt('/workspaces/w_core/agents');
 
     expect(await screen.findByRole('heading', { name: 'Agents' })).toBeInTheDocument();
-    expect(await screen.findByText('frontend-main')).toBeInTheDocument();
-    expect(screen.getAllByText('运行中任务').length).toBeGreaterThan(0);
+    expect(await screen.findByText('Agent 管理功能暂未开放')).toBeInTheDocument();
+    expect(await screen.findByText('Chat 会话和工具调用')).toBeInTheDocument();
+    expect(screen.queryByText('frontend-main')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '新建 Agent' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Agent list and run launch controls/i)).not.toBeInTheDocument();
   });
 
@@ -40,9 +42,10 @@ describe('v0.2 page content depth', () => {
     renderAt('/workspaces/w_core/skill-drafts/sd_motion/review');
 
     expect(await screen.findByRole('heading', { name: 'Skill Review' })).toBeInTheDocument();
-    expect(await screen.findByRole('heading', { name: 'Current workspace' })).toBeInTheDocument();
-    expect(await screen.findByText('debug-rust')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'Global skills' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Current workspace' })).not.toBeInTheDocument();
     expect(await screen.findByText('write-plan')).toBeInTheDocument();
     expect(await screen.findByText('review-agent-output')).toBeInTheDocument();
+    expect(await screen.findByText('Approval results')).toBeInTheDocument();
   });
 });

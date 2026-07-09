@@ -41,6 +41,11 @@ type MockApiState = {
   skillProposals: SkillProposal[];
 };
 
+type SkillInventoryOptions = {
+  clientDaemonId?: string;
+  currentWorkspace?: string;
+};
+
 const clone = <T>(value: T): T => globalThis.structuredClone(value);
 
 function toRunSummary(run: AgentRunDetail): AgentRunSummary {
@@ -52,6 +57,15 @@ function toRunSummary(run: AgentRunDetail): AgentRunSummary {
     status: run.status,
     updatedAt: run.updatedAt
   };
+}
+
+function messageContentPreview(content: ChatSession['messages'][number]['content']): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  return content
+    .map((part) => (part.type === 'text' ? part.text : 'image'))
+    .join(' ')
+    .trim();
 }
 
 function createInitialState(): MockApiState {
@@ -66,6 +80,7 @@ function createInitialState(): MockApiState {
     chatSessions: fixtureChatSessions,
     events: fixtureEvents,
     skillInventory: {
+      projectRoot: '/home/Livenne/code/brainx',
       project: [
         {
           id: 'project-debug-rust',
@@ -82,6 +97,22 @@ function createInitialState(): MockApiState {
           name: 'write-plan',
           description: 'Write implementation plans',
           path: '/home/Livenne/.agents/skills/write-plan/SKILL.md'
+        }
+      ],
+      globalByDaemon: [
+        {
+          daemonId: 'cd_local',
+          deviceName: 'Livenne Workstation',
+          status: 'online',
+          global: [
+            {
+              id: 'global-write-plan',
+              scope: 'global',
+              name: 'write-plan',
+              description: 'Write implementation plans',
+              path: '/home/Livenne/.agents/skills/write-plan/SKILL.md'
+            }
+          ]
         }
       ]
     },
@@ -140,6 +171,30 @@ export async function getDashboard(workspaceId: string): Promise<DashboardData> 
   if (state.workspace.id !== workspaceId) {
     throw new Error(`Workspace ${workspaceId} was not found`);
   }
+  const agentWorkStatus = state.chatSessions
+    .slice()
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 6)
+    .map((session) => ({
+      sessionId: session.id,
+      title: session.title || '新的会话',
+      clientDaemonId: session.clientDaemonId ?? 'cd_local',
+      clientName: session.clientName || state.daemons[0]?.deviceName || '',
+      runStatus: session.runStatus,
+      updatedAt: session.updatedAt,
+      latestOutput: messageContentPreview(
+        [...session.messages]
+          .reverse()
+          .find((message) => message.role === 'user' || message.role === 'assistant')?.content ?? ''
+      ),
+      contextBudget: session.contextBudget ?? {
+        messageCount: session.messages.length,
+        estimatedTokens: Math.max(1, session.messages.length * 1200),
+        maxTokens: 128000,
+        thresholdTokens: 96000,
+        usageRatio: Math.min(1, Math.max(0, (session.messages.length * 1200) / 128000))
+      }
+    }));
   return clone({
     workspace: state.workspace,
     agents: state.agents,
@@ -149,7 +204,19 @@ export async function getDashboard(workspaceId: string): Promise<DashboardData> 
     skillDrafts: state.skillDrafts,
     daemons: state.daemons,
     chatSessions: state.chatSessions,
-    recentEvents: state.events
+    recentEvents: state.events,
+    stats: {
+      tokenUsage: {
+        total: 0,
+        byModel: []
+      },
+      runningByClient: state.daemons.map((daemon) => ({
+        clientDaemonId: daemon.id,
+        clientName: daemon.deviceName,
+        runningSessions: state.chatSessions.filter((session) => (session.clientDaemonId ?? state.daemons[0]?.id) === daemon.id && session.runStatus !== 'completed').length
+      })),
+      agentWorkStatus
+    }
   });
 }
 
@@ -158,25 +225,50 @@ export async function getWorkspaces(): Promise<Workspace[]> {
   return [clone(state.workspace)];
 }
 
-export async function getChatSessions(workspaceId: string): Promise<ChatSession[]> {
+export async function getChatSessions(workspaceId: string, clientDaemonId?: string): Promise<ChatSession[]> {
   await delay(80);
   if (state.workspace.id !== workspaceId) {
     throw new Error(`Workspace ${workspaceId} was not found`);
   }
-  return clone(state.chatSessions);
+  const sessions = clientDaemonId
+    ? state.chatSessions.filter((session) => (session.clientDaemonId ?? 'cd_local') === clientDaemonId)
+    : state.chatSessions;
+  return clone(sessions);
 }
 
-export async function getSkillInventory(workspaceId: string): Promise<SkillInventory> {
+export async function getClientDaemons(): Promise<ClientDaemon[]> {
+  await delay(40);
+  return clone(state.daemons);
+}
+
+export async function getSkillInventory(workspaceId: string, options?: SkillInventoryOptions): Promise<SkillInventory> {
   await delay(40);
   if (state.workspace.id !== workspaceId) {
     throw new Error(`Workspace ${workspaceId} was not found`);
   }
-  return clone(state.skillInventory);
+  if (options?.currentWorkspace) {
+    return clone({
+      projectRoot: options.currentWorkspace,
+      project: state.skillInventory.project.filter((skill) =>
+        normalizePath(skill.path).startsWith(`${normalizePath(options.currentWorkspace ?? '')}/.agents/skills/`)
+      ),
+      global: state.skillInventory.global,
+      globalByDaemon: []
+    });
+  }
+  return clone({
+    project: [],
+    global: [],
+    globalByDaemon: state.skillInventory.globalByDaemon ?? []
+  });
 }
 
-export async function getSkillProposals(): Promise<SkillProposal[]> {
+export async function getSkillProposals(workspaceId?: string): Promise<SkillProposal[]> {
   await delay(40);
-  return clone(state.skillProposals);
+  const proposals = workspaceId
+    ? state.skillProposals.filter((proposal) => proposal.workspaceId === workspaceId)
+    : state.skillProposals;
+  return clone(proposals);
 }
 
 export async function approveSkillProposal(proposalId: string): Promise<SkillProposal> {
@@ -185,6 +277,8 @@ export async function approveSkillProposal(proposalId: string): Promise<SkillPro
   if (!proposal) throw new Error(`Skill proposal ${proposalId} was not found`);
   proposal.status = 'approved';
   proposal.reviewedAt = new Date().toISOString();
+  supersedeDuplicateSkillProposals(proposal);
+  publishApprovedSkill(proposal);
   return clone(proposal);
 }
 
@@ -195,6 +289,38 @@ export async function rejectSkillProposal(proposalId: string): Promise<SkillProp
   proposal.status = 'rejected';
   proposal.reviewedAt = new Date().toISOString();
   return clone(proposal);
+}
+
+function publishApprovedSkill(proposal: SkillProposal): void {
+  const target = proposal.scope === 'global' ? state.skillInventory.global : state.skillInventory.project;
+  if (target.some((skill) => normalizePath(skill.path) === normalizePath(proposal.path))) {
+    return;
+  }
+  target.push({
+    id: proposal.id,
+    scope: proposal.scope,
+    name: proposal.name,
+    description: proposal.reason || proposal.path,
+    path: proposal.path
+  });
+}
+
+function supersedeDuplicateSkillProposals(proposal: SkillProposal): void {
+  const path = normalizePath(proposal.path);
+  if (!path) return;
+  state.skillProposals.forEach((candidate) => {
+    if (candidate.id === proposal.id) return;
+    if (candidate.workspaceId !== proposal.workspaceId) return;
+    if (candidate.status !== 'review_requested') return;
+    if (normalizePath(candidate.path) === path) {
+      candidate.status = 'superseded';
+      candidate.reviewedAt = new Date().toISOString();
+    }
+  });
+}
+
+function normalizePath(path: string): string {
+  return path.trim().replaceAll('\\', '/');
 }
 
 export async function createChatSession(workspaceId: string, title?: string): Promise<ChatSession> {
@@ -211,6 +337,7 @@ export async function createChatSession(workspaceId: string, title?: string): Pr
     workspaceId,
     workspaceName: base?.workspaceName ?? state.workspace.name,
     currentWorkspace: base?.currentWorkspace ?? state.workspace.path,
+    clientDaemonId: base?.clientDaemonId ?? state.daemons[0]?.id,
     agentId: base?.agentId ?? 'agent_frontend',
     agentName: base?.agentName ?? 'frontend-main',
     branchName: base?.branchName ?? 'mainline',
@@ -295,6 +422,7 @@ export async function sendChatCommand(
         kind,
         message,
         detail,
+        afterMessageIndex: session.messages.length,
         createdAt: new Date().toISOString()
       }
     ];
@@ -308,6 +436,7 @@ export async function sendChatCommand(
         id: `notice_${Date.now()}_clear`,
         kind: 'context_cleared',
         message: '已清空上下文',
+        afterMessageIndex: 0,
         createdAt: new Date().toISOString()
       }
     ];
@@ -317,7 +446,7 @@ export async function sendChatCommand(
 
   if (command === 'model') {
     const modelName = typeof args.modelName === 'string' ? args.modelName : '';
-    const exists = session.availableModels?.some((model) => model.name === modelName) ?? modelName === 'nvidia-step';
+    const exists = session.availableModels?.some((model) => model.name === modelName || model.key === modelName) ?? modelName === 'nvidia:stepfun-ai/step-3.7-flash';
     if (!modelName || !exists) {
       throw new Error(`Unknown model: ${modelName}`);
     }

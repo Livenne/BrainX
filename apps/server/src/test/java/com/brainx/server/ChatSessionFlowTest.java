@@ -31,7 +31,9 @@ class ChatSessionFlowTest {
 
     assertThat(created.get("title").isNull()).isTrue();
     assertThat(created.get("messages")).hasSize(0);
-    assertThat(created.get("availableModels").toString()).contains("nvidia-step").contains("gpt-5.5");
+    assertThat(created.get("availableModels").toString())
+        .contains("nvidia:stepfun-ai/step-3.7-flash")
+        .contains("gpt:gpt-5.5");
 
     postJson("/api/v1/workspaces/w_core/chat/sessions/" + created.get("id").asText() + "/messages", """
       {"content":"新会话第一轮"}
@@ -197,6 +199,51 @@ class ChatSessionFlowTest {
   }
 
   @Test
+  void imageAttachmentsDoNotCountBase64PayloadAsTextTokens() throws Exception {
+    registerLocalDaemon();
+    var imagePayload = "A".repeat(4 * 1024 * 1024);
+
+    JsonNode session = postJson("/api/v1/workspaces/w_core/chat/messages", """
+      {
+        "content":"分析这张图",
+        "attachments":[{
+          "id":"img",
+          "name":"screen.png",
+          "mimeType":"image/png",
+          "size":3145728,
+          "kind":"image",
+          "dataUrl":"data:image/png;base64,%s"
+        }]
+      }
+      """.formatted(imagePayload));
+
+    JsonNode budget = session.get("contextBudget");
+    assertThat(budget.get("estimatedTokens").asInt()).isLessThan(20_000);
+    assertThat(budget.get("usageRatio").asDouble()).isLessThan(0.75);
+  }
+
+  @Test
+  void chatSessionsCanBeScopedToClientDaemon() throws Exception {
+    String firstDaemon = registerLocalDaemon("devbox-a");
+    String secondDaemon = registerLocalDaemon("devbox-b");
+
+    JsonNode first = postJson("/api/v1/workspaces/w_core/chat/sessions", """
+      {"clientDaemonId":"%s","title":"A session"}
+      """.formatted(firstDaemon));
+    JsonNode second = postJson("/api/v1/workspaces/w_core/chat/sessions", """
+      {"clientDaemonId":"%s","title":"B session"}
+      """.formatted(secondDaemon));
+
+    JsonNode firstSessions = getJson("/api/v1/workspaces/w_core/chat/sessions?clientDaemonId=" + firstDaemon);
+    JsonNode secondSessions = getJson("/api/v1/workspaces/w_core/chat/sessions?clientDaemonId=" + secondDaemon);
+
+    assertThat(first.get("clientDaemonId").asText()).isEqualTo(firstDaemon);
+    assertThat(second.get("clientDaemonId").asText()).isEqualTo(secondDaemon);
+    assertThat(firstSessions.toString()).contains("A session").doesNotContain("B session");
+    assertThat(secondSessions.toString()).contains("B session").doesNotContain("A session");
+  }
+
+  @Test
   void firstCompletedExchangeRequestsSessionTitleWhenTitleIsBlank() throws Exception {
     String daemonId = registerLocalDaemon();
     JsonNode created = postJson("/api/v1/workspaces/w_core/chat/sessions", "{}");
@@ -270,13 +317,17 @@ class ChatSessionFlowTest {
   }
 
   private String registerLocalDaemon() throws Exception {
+    return registerLocalDaemon("local-dev");
+  }
+
+  private String registerLocalDaemon(String deviceName) throws Exception {
     return postJson("/api/v1/client-daemons/register", """
       {
         "workspaceId":"w_core",
-        "deviceName":"local-dev",
+        "deviceName":"%s",
         "capabilities":["model.invoke","agent.loop"]
       }
-      """).get("id").asText();
+      """.formatted(deviceName)).get("id").asText();
   }
 
   private JsonNode pendingRequests(String daemonId) throws Exception {

@@ -61,4 +61,12 @@ describe('visual design constraints', () => {
     expect(chatCss).not.toMatch(/\.chat-session-trigger\s*\{[^}]*border-radius:\s*999px;/s);
     expect(chatCss).not.toMatch(/\.chat-session-popover\s*\{[^}]*border-radius:\s*999px;/s);
   });
+
+  it('removes hidden-label spacing from collapsed sidebar icons', () => {
+    const shellCss = readSource('components/AppShell.css');
+
+    expect(shellCss).toMatch(/\.primary-nav\[data-collapsed='true'\]\s+\.nav-brand-row\s*\{[^}]*gap:\s*0;/s);
+    expect(shellCss).toMatch(/\.primary-nav\[data-collapsed='true'\]\s+\.nav-item\s*\{[^}]*gap:\s*0;/s);
+    expect(shellCss).toMatch(/\.primary-nav\[data-collapsed='true'\]\s+\.sidebar-toggle\s*\{[^}]*gap:\s*0;/s);
+  });
 });

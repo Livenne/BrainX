@@ -53,7 +53,7 @@ describe('mock API', () => {
     expect(nextDashboard.pendingApprovals[0].title).toBe('Publish skill version');
     expect(nextDashboard.branches[0].name).toBe('motion-v2');
     expect(nextDashboard.skillDrafts[0].name).toBe('browser-motion-review');
-    expect(nextDashboard.daemons[0].name).toBe('brainx-client-local');
+    expect(nextDashboard.daemons[0].name).toBe('Livenne Workstation');
     expect(nextDashboard.recentEvents[0].message).toBe('Planning branch adoption scope');
   });
 
@@ -75,7 +75,7 @@ describe('mock API', () => {
     expect(nextDashboard.pendingApprovals[0].title).toBe('Publish skill version');
     expect(nextDashboard.branches[0].name).toBe('motion-v2');
     expect(nextDashboard.skillDrafts[0].name).toBe('browser-motion-review');
-    expect(nextDashboard.daemons[0].name).toBe('brainx-client-local');
+    expect(nextDashboard.daemons[0].name).toBe('Livenne Workstation');
     expect(nextDashboard.recentEvents[0].message).toBe('Planning branch adoption scope');
   });
 

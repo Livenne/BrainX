@@ -1,6 +1,6 @@
 use crate::auth::{default_workspace_path, save_config, ClientConfig, CAPABILITIES};
 use crate::logging::log_event;
-use crate::model::{ModelClient, ModelConfig, ModelStreamEvent};
+use crate::model::{discover_provider_models, ModelCatalogEntry, ModelClient, ModelConfig, ModelStreamEvent};
 use crate::protocol::{
     ExecutionRequest, ExecutionResultPayload, ExecutionStreamEventPayload, RegisterDaemonRequest,
     RegisterDaemonResponse,
@@ -10,6 +10,7 @@ use anyhow::{Context, Error, Result};
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -24,7 +25,8 @@ pub async fn run_once(
     workspace_root: &Path,
 ) -> Result<()> {
     let client = Client::new();
-    let daemon = register(&client, server_url, workspace_id, device_name).await?;
+    let installation_id = format!("adhoc-{workspace_id}-{device_name}");
+    let daemon = register(&client, server_url, workspace_id, device_name, &installation_id).await?;
     let requests = poll_requests(&client, server_url, &daemon.id).await?;
     log_event(
         "info",
@@ -35,7 +37,11 @@ pub async fn run_once(
     post_skill_inventory(&client, server_url, &daemon.id, &tools).await;
     for request in requests {
         let result = execute_request(&client, server_url, &daemon.id, &tools, &request, None).await;
+        let should_sync_skills = should_sync_skill_inventory_after(&request, &result);
         post_result(&client, server_url, &daemon.id, &result).await?;
+        if should_sync_skills {
+            post_skill_inventory(&client, server_url, &daemon.id, &tools).await;
+        }
     }
     Ok(())
 }
@@ -48,7 +54,8 @@ pub async fn run_loop(
     poll_interval: Duration,
 ) -> Result<()> {
     let client = Client::new();
-    let daemon = register(&client, server_url, workspace_id, device_name).await?;
+    let installation_id = format!("adhoc-{workspace_id}-{device_name}");
+    let daemon = register(&client, server_url, workspace_id, device_name, &installation_id).await?;
     let tools = WorkspaceTools::new(workspace_root);
     loop {
         let requests = poll_requests(&client, server_url, &daemon.id).await?;
@@ -60,7 +67,11 @@ pub async fn run_loop(
         post_skill_inventory(&client, server_url, &daemon.id, &tools).await;
         for request in requests {
             let result = execute_request(&client, server_url, &daemon.id, &tools, &request, None).await;
+            let should_sync_skills = should_sync_skill_inventory_after(&request, &result);
             post_result(&client, server_url, &daemon.id, &result).await?;
+            if should_sync_skills {
+                post_skill_inventory(&client, server_url, &daemon.id, &tools).await;
+            }
         }
         sleep(poll_interval).await;
     }
@@ -72,18 +83,31 @@ pub async fn run_loop_with_config(
     poll_interval: Duration,
 ) -> Result<()> {
     let client = Client::new();
-    let mut daemon_id = match config.daemon_id.clone() {
-        Some(daemon_id) if !daemon_id.is_empty() => daemon_id,
-        _ => {
-            let daemon = register(&client, &config.server_url, "w_core", &config.device_name).await?;
-            config.daemon_id = Some(daemon.id.clone());
-            save_config(config_path.clone(), &config)?;
-            daemon.id
-        }
-    };
+    let daemon = register(
+        &client,
+        &config.server_url,
+        "w_core",
+        &config.device_name,
+        &config.installation_id,
+    )
+    .await?;
+    config.daemon_id = Some(daemon.id.clone());
+    config.client_token = Some(daemon.client_token.clone());
+    save_config(config_path.clone(), &config)?;
+    let mut daemon_id = daemon.id;
     let tool_runtime = ToolRuntimeState::default();
+    let initial_workspace_root = default_workspace_path()?;
+    let initial_tools = WorkspaceTools::new_with_state(&initial_workspace_root, tool_runtime.clone())
+        .with_web_search_config(config.web_search.clone());
+    post_skill_inventory(&client, &config.server_url, &daemon_id, &initial_tools).await;
+    post_model_catalog(&client, &config.server_url, &daemon_id, &config).await;
     loop {
-        let requests = match poll_requests(&client, &config.server_url, &daemon_id).await {
+        let requests = match poll_requests_with_token(
+            &client,
+            &config.server_url,
+            &daemon_id,
+            config.client_token.as_deref(),
+        ).await {
             Ok(requests) => requests,
             Err(error) if is_http_status(&error, StatusCode::NOT_FOUND) => {
                 log_event(
@@ -91,11 +115,32 @@ pub async fn run_loop_with_config(
                     "daemon.registration.stale",
                     json!({"daemonId": &daemon_id, "reason": "server did not recognize daemon id"}),
                 );
-                let daemon = register(&client, &config.server_url, "w_core", &config.device_name).await?;
+                let daemon = register(
+                    &client,
+                    &config.server_url,
+                    "w_core",
+                    &config.device_name,
+                    &config.installation_id,
+                ).await?;
                 daemon_id = daemon.id.clone();
                 config.daemon_id = Some(daemon.id);
+                config.client_token = Some(daemon.client_token);
                 save_config(config_path.clone(), &config)?;
+                post_model_catalog(&client, &config.server_url, &daemon_id, &config).await;
                 Vec::new()
+            }
+            Err(error) if is_http_status(&error, StatusCode::FORBIDDEN) => {
+                log_event(
+                    "warn",
+                    "daemon.binding.waiting",
+                    json!({
+                        "daemonId": &daemon_id,
+                        "reason": "server rejected polling; the client may still be waiting for browser binding",
+                        "error": error.to_string()
+                    }),
+                );
+                sleep(poll_interval).await;
+                continue;
             }
             Err(error) => return Err(error),
         };
@@ -111,10 +156,21 @@ pub async fn run_loop_with_config(
                 .and_then(|value| value.as_str())
                 .map(PathBuf::from)
                 .unwrap_or(default_workspace_path()?);
-            let tools = WorkspaceTools::new_with_state(&workspace_root, tool_runtime.clone());
+            let tools = WorkspaceTools::new_with_state(&workspace_root, tool_runtime.clone())
+                .with_web_search_config(config.web_search.clone());
             post_skill_inventory(&client, &config.server_url, &daemon_id, &tools).await;
             let result = execute_request(&client, &config.server_url, &daemon_id, &tools, &request, Some(&config)).await;
-            post_result(&client, &config.server_url, &daemon_id, &result).await?;
+            let should_sync_skills = should_sync_skill_inventory_after(&request, &result);
+            post_result_with_token(
+                &client,
+                &config.server_url,
+                &daemon_id,
+                &result,
+                config.client_token.as_deref(),
+            ).await?;
+            if should_sync_skills {
+                post_skill_inventory(&client, &config.server_url, &daemon_id, &tools).await;
+            }
         }
         sleep(poll_interval).await;
     }
@@ -132,13 +188,17 @@ async fn register(
     server_url: &str,
     workspace_id: &str,
     device_name: &str,
+    installation_id: &str,
 ) -> Result<RegisterDaemonResponse> {
     let url = format!("{}/api/v1/client-daemons/register", server_url.trim_end_matches('/'));
+    let operating_system = operating_system_description();
     let daemon: RegisterDaemonResponse = client
         .post(url)
         .json(&RegisterDaemonRequest {
             workspace_id,
             device_name,
+            operating_system: &operating_system,
+            installation_id,
             capabilities: CAPABILITIES.to_vec(),
         })
         .send()
@@ -152,9 +212,29 @@ async fn register(
     log_event(
         "info",
         "daemon.registered",
-        json!({"daemonId": &daemon.id, "workspaceId": workspace_id, "deviceName": device_name}),
+        json!({"daemonId": &daemon.id, "workspaceId": workspace_id, "deviceName": device_name, "operatingSystem": operating_system}),
     );
     Ok(daemon)
+}
+
+fn operating_system_description() -> String {
+    uname_description()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("{} {}", std::env::consts::OS, std::env::consts::ARCH))
+}
+
+#[cfg(unix)]
+fn uname_description() -> Option<String> {
+    let output = Command::new("uname").args(["-srmo"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(not(unix))]
+fn uname_description() -> Option<String> {
+    None
 }
 
 async fn poll_requests(client: &Client, server_url: &str, daemon_id: &str) -> Result<Vec<ExecutionRequest>> {
@@ -218,6 +298,62 @@ async fn post_skill_inventory(client: &Client, server_url: &str, daemon_id: &str
     }
 }
 
+async fn post_model_catalog(client: &Client, server_url: &str, daemon_id: &str, config: &ClientConfig) {
+    let mut models: Vec<ModelCatalogEntry> = Vec::new();
+    let mut providers = Vec::new();
+    for provider in &config.providers {
+        match discover_provider_models(provider, &config.model_context_windows).await {
+            Ok(mut discovered) => {
+                models.append(&mut discovered);
+                providers.push(json!({
+                    "name": provider.name,
+                    "protocol": provider.protocol,
+                    "status": "ok"
+                }));
+            }
+            Err(error) => {
+                log_event(
+                    "warn",
+                    "models.discovery.failed",
+                    json!({"daemonId": daemon_id, "provider": provider.name, "error": error.to_string()}),
+                );
+                providers.push(json!({
+                    "name": provider.name,
+                    "protocol": provider.protocol,
+                    "status": "failed",
+                    "error": error.to_string()
+                }));
+            }
+        }
+    }
+    let catalog = json!({
+        "models": models,
+        "providers": providers
+    });
+    let url = format!(
+        "{}/api/v1/client-daemons/{daemon_id}/models",
+        server_url.trim_end_matches('/')
+    );
+    if let Err(error) = client
+        .put(url)
+        .json(&catalog)
+        .send()
+        .await
+        .context("failed to sync model catalog")
+        .and_then(|response| response.error_for_status().context("server rejected model catalog sync"))
+    {
+        log_event(
+            "warn",
+            "models.sync.failed",
+            json!({"daemonId": daemon_id, "error": error.to_string()}),
+        );
+    }
+}
+
+fn should_sync_skill_inventory_after(request: &ExecutionRequest, result: &ExecutionResultPayload) -> bool {
+    request.tool_name == "skill.apply" && result.status == "completed"
+}
+
 async fn execute_request(
     http: &Client,
     server_url: &str,
@@ -240,7 +376,7 @@ async fn execute_request(
     let result = if request.tool_name == "model.invoke" {
         execute_model_request(http, server_url, daemon_id, tools, request, config).await
     } else {
-        match tools.execute(&request.tool_name, &request.input) {
+        match tools.execute_async(&request.tool_name, &request.input).await {
             Ok(data) => ExecutionResultPayload::completed(
                 &request.execution_id,
                 format!("{} completed", request.tool_name),
@@ -290,7 +426,13 @@ async fn execute_model_request(
             .clone()
             .with_active_model_info(model_config.name.clone(), model_config.model.clone());
         let client = ModelClient::new(model_config);
-        let reporter = StreamReporter::new(http.clone(), server_url, daemon_id, request);
+        let reporter = StreamReporter::new(
+            http.clone(),
+            server_url,
+            daemon_id,
+            config.and_then(|config| config.client_token.as_deref()),
+            request,
+        );
         run_local_agent_loop(&request_tools, &client, &request.input, reporter).await
     }
     .await;
@@ -356,9 +498,22 @@ async fn run_local_agent_loop(
             let tool_name = tool_call
                 .get("name")
                 .and_then(Value::as_str)
-                .context("model tool call requires name")?;
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    log_event(
+                        "error",
+                        "model.tool_call.invalid",
+                        json!({
+                            "runId": input.get("runId").and_then(Value::as_str).unwrap_or(""),
+                            "toolCallId": &tool_call_id,
+                            "reason": "missing_function_name"
+                        }),
+                    );
+                    anyhow::anyhow!("model tool call requires non-empty name")
+                })?;
             let arguments = tool_call.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let tool_result = match tools.execute(tool_name, &arguments) {
+            let tool_result = match tools.execute_async(tool_name, &arguments).await {
                 Ok(data) => json!({ "ok": true, "result": data }),
                 Err(error) => json!({ "ok": false, "error": error.to_string() }),
             };
@@ -409,17 +564,25 @@ struct StreamReporter {
     http: Client,
     server_url: String,
     daemon_id: String,
+    client_token: Option<String>,
     execution_id: String,
     run_id: String,
     sequence: Arc<AtomicUsize>,
 }
 
 impl StreamReporter {
-    fn new(http: Client, server_url: &str, daemon_id: &str, request: &ExecutionRequest) -> Self {
+    fn new(
+        http: Client,
+        server_url: &str,
+        daemon_id: &str,
+        client_token: Option<&str>,
+        request: &ExecutionRequest,
+    ) -> Self {
         Self {
             http,
             server_url: server_url.trim_end_matches('/').to_string(),
             daemon_id: daemon_id.to_string(),
+            client_token: client_token.map(ToString::to_string),
             execution_id: request.execution_id.clone(),
             run_id: request.run_id.clone(),
             sequence: Arc::new(AtomicUsize::new(0)),
@@ -432,17 +595,18 @@ impl StreamReporter {
             "{}/api/v1/client-daemons/{}/execution-stream-events",
             self.server_url, self.daemon_id
         );
-        let result = self
-            .http
-            .post(url)
-            .json(&ExecutionStreamEventPayload {
+        let mut request = self.http.post(url).json(&ExecutionStreamEventPayload {
                 execution_id: self.execution_id.clone(),
                 run_id: self.run_id.clone(),
                 sequence,
                 event_type: event.event_type.clone(),
                 content_delta: event.content_delta.clone(),
                 payload: event.payload.clone(),
-            })
+            });
+        if let Some(token) = &self.client_token {
+            request = request.bearer_auth(token);
+        }
+        let result = request
             .send()
             .await
             .context("failed to post execution stream event")?

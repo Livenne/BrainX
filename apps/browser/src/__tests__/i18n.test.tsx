@@ -18,7 +18,8 @@ describe('i18n support', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: '总览' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '审批' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '审批' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Client' })).toBeInTheDocument();
     expect(await screen.findByText('运行中任务')).toBeInTheDocument();
 
     await user.click(screen.getByRole('link', { name: '设置' }));
@@ -28,7 +29,8 @@ describe('i18n support', () => {
     await user.click(screen.getByRole('button', { name: /switch language to english/i }));
 
     expect(await screen.findByRole('heading', { name: 'Settings' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Approvals' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Client' })).toBeInTheDocument();
     expect(window.location.pathname).toBe(settingsPath);
     expect(window.localStorage.getItem('brainx.locale')).toBe('en-US');
   });

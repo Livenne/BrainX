@@ -193,9 +193,18 @@ export type SkillSummary = {
   updatedAt?: string;
 };
 
+export type SkillInventoryByDaemon = {
+  daemonId: string;
+  deviceName: string;
+  status: string;
+  global: SkillSummary[];
+};
+
 export type SkillInventory = {
   project: SkillSummary[];
   global: SkillSummary[];
+  projectRoot?: string;
+  globalByDaemon?: SkillInventoryByDaemon[];
 };
 
 export type SkillProposal = {
@@ -210,7 +219,7 @@ export type SkillProposal = {
   reason: string;
   evidence: string[];
   confidence: number;
-  status: SkillDraftStatus | 'review_requested' | 'apply_failed';
+  status: SkillDraftStatus | 'review_requested' | 'apply_failed' | 'superseded';
   version: number;
   createdAt: string;
   reviewedAt?: string | null;
@@ -343,6 +352,7 @@ export type ChatTimelineNotice = {
     | string;
   message: string;
   detail?: string;
+  afterMessageIndex?: number;
   messageIndex?: number;
   createdAt: string;
 };
@@ -367,6 +377,7 @@ export type ChatSession = {
   workspaceId?: string;
   workspaceName: string;
   currentWorkspace?: string;
+  clientDaemonId?: string;
   agentId: string;
   agentName: string;
   branchName: string;
@@ -382,12 +393,15 @@ export type ChatSession = {
     messageCount: number;
     estimatedTokens: number;
     maxTokens: number;
+    contextWindowKnown?: boolean;
     thresholdTokens: number;
     usageRatio: number;
     lastUsage?: Record<string, unknown>;
   };
   availableModels?: Array<{
     name: string;
+    key?: string;
+    providerName?: string;
     model: string;
     protocol: string;
     contextWindow?: number;
@@ -415,4 +429,28 @@ export type DashboardData = {
   daemons: ClientDaemon[];
   chatSessions: ChatSession[];
   recentEvents: ExecutionEvent[];
+  stats?: {
+    tokenUsage?: {
+      total: number;
+      byModel: Array<{
+        modelName: string;
+        totalTokens: number;
+      }>;
+    };
+    runningByClient?: Array<{
+      clientDaemonId: string;
+      clientName?: string;
+      runningSessions: number;
+    }>;
+    agentWorkStatus?: Array<{
+      sessionId: string;
+      title: string;
+      clientDaemonId?: string;
+      clientName?: string;
+      runStatus: RunStatus;
+      updatedAt: string;
+      latestOutput?: string;
+      contextBudget?: ChatSession['contextBudget'];
+    }>;
+  };
 };

@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppRoutes } from '../App';
 import { i18n } from '../i18n/i18n';
-import { diffLineKind, sanitizeChatError, takeTypewriterSlice } from '../pages/ChatPage';
+import { diffLineKind, isUsableChatClient, sanitizeChatError, takeTypewriterSlice } from '../pages/ChatPage';
 import { resetMockApiState } from '../services/mockApi';
 import { ThemeProvider } from '../state/theme';
 
@@ -43,24 +43,33 @@ describe('v0.3 Chat workspace', () => {
     renderAt('/workspaces/w_core/chat');
 
     expect(await screen.findByRole('heading', { name: 'Chat' })).toBeInTheDocument();
-    expect(await screen.findByRole('heading', { name: 'What should brainx work on?' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Empty chat' })).toBeInTheDocument();
+    expect(await screen.findByRole('log', { name: 'Agent loop timeline' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'What should brainx work on?' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Empty chat' })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('combobox', { name: 'Chat sessions' }));
     expect(screen.getByRole('option', { name: 'New chat' })).toBeInTheDocument();
     expect(screen.queryByRole('complementary', { name: 'Chat sessions' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('log', { name: 'Agent loop timeline' })).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Message brainx' })).toBeInTheDocument();
     expect(screen.getByRole('form', { name: 'Message composer' })).toHaveClass('composer-dock-sticky');
     expect(screen.queryByRole('combobox', { name: 'Composer mode' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Attach files' })).toHaveClass('composer-icon-button');
     expect(screen.getByRole('button', { name: 'Send message' })).toHaveClass('composer-send-button');
-    expect(screen.queryByRole('progressbar', { name: 'Context budget' })).not.toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: 'Context budget' })).toBeInTheDocument();
     expect(within(screen.getByRole('form', { name: 'Message composer' })).queryByText('Working')).not.toBeInTheDocument();
     expect(screen.queryByText('workspace ~/.brainx/workspace')).not.toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Agent context' })).not.toBeInTheDocument();
     expect(screen.queryByRole('complementary', { name: 'Execution state' })).not.toBeInTheDocument();
     expect(screen.queryByRole('list', { name: 'Todo list' })).not.toBeInTheDocument();
     expect(screen.queryByRole('log', { name: 'Background terminal' })).not.toBeInTheDocument();
+  });
+
+  it('keeps New chat as an empty page with the session list open', async () => {
+    renderAt('/workspaces/w_core/chat?sessionId=new');
+
+    expect(await screen.findByRole('heading', { name: 'What should brainx work on?' })).toBeInTheDocument();
+    const selector = await screen.findByRole('combobox', { name: 'Chat sessions' });
+    expect(selector).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('listbox', { name: 'Chat sessions' })).toBeInTheDocument();
   });
 
   it('renders structured agent message blocks as collapsed timeline disclosures', async () => {
@@ -195,5 +204,13 @@ describe('v0.3 Chat workspace', () => {
     expect(sanitizeChatError('model.invoke failed: model provider returned HTTP 429: {"status":429,"title":"Too Many Requests"}')).toBe(
       'HTTP 429: Too Many Requests'
     );
+  });
+
+  it('only treats active or online clients as usable chat targets', () => {
+    expect(isUsableChatClient({ status: 'active' })).toBe(true);
+    expect(isUsableChatClient({ status: 'online' })).toBe(true);
+    expect(isUsableChatClient({ status: 'revoked' })).toBe(false);
+    expect(isUsableChatClient({ status: 'offline' })).toBe(false);
+    expect(isUsableChatClient({ status: 'stale' })).toBe(false);
   });
 });

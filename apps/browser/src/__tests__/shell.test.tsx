@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -42,7 +42,37 @@ describe('v0.2 app shell', () => {
     expect(await screen.findByRole('heading', { name: '总览' })).toBeInTheDocument();
     expect(container.querySelector('.app-shell')).toHaveClass('full-workbench');
     expect(screen.getByRole('navigation', { name: '主导航' })).toHaveAttribute('data-collapsed', 'false');
-    expect(screen.getByRole('link', { name: '分支' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '分支' })).not.toBeInTheDocument();
+  });
+
+  it('uses the repository logo image for the sidebar brand mark', async () => {
+    const { container } = renderAt('/workspaces/w_core');
+
+    expect(await screen.findByRole('heading', { name: '总览' })).toBeInTheDocument();
+    const brandMark = container.querySelector('.brand-mark');
+    expect(within(brandMark as HTMLElement).getByRole('img', { name: 'brainx' })).toHaveAttribute('src', expect.stringContaining('logo.png'));
+    expect(brandMark).not.toHaveTextContent(/^bx$/i);
+    expect(screen.getByTestId('brand-copy')).toHaveTextContent('BrainX');
+    expect(screen.getByTestId('brand-copy')).not.toHaveTextContent('Session');
+  });
+
+  it('places the bound client dropdown beside the chat title with polished controls', async () => {
+    const user = userEvent.setup();
+    const { container } = renderAt('/workspaces/w_core/chat');
+
+    expect(await screen.findByRole('heading', { name: 'Chat' })).toBeInTheDocument();
+    const titleRow = container.querySelector('.workspace-title-row');
+    expect(titleRow).not.toBeNull();
+    expect(within(titleRow as HTMLElement).getByRole('heading', { name: 'Chat' })).toBeInTheDocument();
+    const trigger = within(titleRow as HTMLElement).getByRole('button', { name: /Bound client device/i });
+    expect(trigger).toHaveClass('top-client-trigger');
+    expect(trigger).toHaveTextContent('Livenne Workstation');
+    expect(trigger).not.toHaveTextContent(/^Client/i);
+
+    await user.click(trigger);
+    const listbox = await screen.findByRole('listbox', { name: 'Bound client devices' });
+    expect(listbox).toHaveClass('top-client-menu');
+    expect(within(listbox).getByRole('option', { name: /Livenne Workstation/ })).toBeInTheDocument();
   });
 
   it('collapses and persists the sidebar state', async () => {

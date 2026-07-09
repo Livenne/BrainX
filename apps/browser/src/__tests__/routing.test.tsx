@@ -27,12 +27,10 @@ describe('browser routing', () => {
     expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
   });
 
-  it('renders the session chat entry route', async () => {
+  it('uses dashboard as the default app route', async () => {
     renderAt('/');
 
-    expect(await screen.findByRole('heading', { name: /^chat$/i })).toBeInTheDocument();
-    expect(await screen.findByRole('heading', { name: 'What should brainx work on?' })).toBeInTheDocument();
-    expect(screen.getByRole('region', { name: 'Empty chat' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
   });
 
   it('renders the run detail route', async () => {
@@ -46,14 +44,12 @@ describe('browser routing', () => {
     renderAt('/workspaces/w_core');
 
     const navExpectations = [
+      ['Dashboard', /^dashboard$/i],
       ['Chat', /^chat$/i],
       ['Agents', /agents/i],
-      ['Branches', /branches/i],
-      ['Approvals', /approvals/i],
       ['Skills', /skill review/i],
       ['Client', /^client$/i],
-      ['Settings', /settings/i],
-      ['Dashboard', /^dashboard$/i]
+      ['Settings', /settings/i]
     ] as const;
 
     for (const [label, heading] of navExpectations) {
@@ -68,11 +64,19 @@ describe('browser routing', () => {
 
     const statusBar = await screen.findByRole('banner', { name: 'Top bar' });
     expect(within(statusBar).getByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Approvals' })).toHaveAttribute('href', '/workspaces/other/approvals');
+    expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Branches' })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('link', { name: 'Approvals' }));
+    await user.click(screen.getByRole('link', { name: 'Chat' }));
 
-    expect(await screen.findByRole('heading', { name: /approvals/i })).toBeInTheDocument();
-    expect(within(screen.getByRole('banner', { name: 'Top bar' })).getByRole('heading', { name: /approvals/i })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /^chat$/i })).toBeInTheDocument();
+    expect(within(screen.getByRole('banner', { name: 'Top bar' })).getByRole('heading', { name: /^chat$/i })).toBeInTheDocument();
+  });
+
+  it('redirects the removed branches route to the dashboard', async () => {
+    renderAt('/workspaces/w_core/branches');
+
+    expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Branches' })).not.toBeInTheDocument();
   });
 });

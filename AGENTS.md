@@ -2,37 +2,42 @@
 
 ## Project Structure & Module Organization
 
-This repository currently contains no source, test, or asset files. When adding implementation code, keep the top-level layout predictable:
+BrainX is organized as a three-part B/S/C system:
 
-- `src/` for application or library code.
-- `tests/` for automated tests that mirror `src/` paths.
-- `assets/` for static files such as images, fixtures, or sample data.
-- `docs/` for design notes, operating instructions, and contributor references.
+- `apps/browser/` contains the React browser workbench.
+- `apps/server/` contains the Spring Boot control plane.
+- `apps/client-daemon/` contains the Rust local daemon and CLI.
+- `scripts/` contains local development and install helpers.
+- `docs/` contains design notes and project references when needed.
 
-Avoid placing generated build output or dependency caches in the repository. Update this guide when a concrete framework or module layout is introduced.
+Keep generated output, local logs, screenshots, private notes, and runtime state out of the repository.
 
 ## Build, Test, and Development Commands
 
-No build, test, or local development commands are defined yet. When tooling is added, document the canonical commands in `README.md` and keep this section in sync. Prefer standard entry points such as:
+- `cd apps/browser && npm test -- --run` runs the browser test suite.
+- `cd apps/browser && npm run build` builds the browser app.
+- `cd apps/server && source ../../scripts/use-local-toolchains.sh && mvn test` runs server tests.
+- `cd apps/client-daemon && source ../../scripts/use-local-toolchains.sh && cargo test` runs daemon tests.
+- `scripts/install-client.sh` builds and installs the `brainx` CLI to `~/.brainx/bin` by default.
 
-- `npm test`, `pytest`, `cargo test`, or equivalent for the full test suite.
-- `npm run build`, `make build`, or equivalent for production artifacts.
-- `npm run dev`, `make dev`, or equivalent for local development.
+Use `README.md` for the full local startup flow.
 
 ## Coding Style & Naming Conventions
 
-Follow the formatter and linter provided by the chosen language stack once one exists. Until then, use consistent indentation within each file, descriptive names, and small modules with a single responsibility. Use lowercase, hyphenated directory names such as `user-flows/`; use language-standard file naming for source files.
+Follow the existing style in each app. Browser code uses TypeScript and React components with colocated CSS. Server code uses Java package conventions under `com.brainx.server`. Client daemon code follows standard Rust module and test naming.
+
+Prefer clear, narrowly scoped modules. Keep UI mock data separate from API services, and keep C-side tool execution separate from model/provider plumbing.
 
 ## Testing Guidelines
 
-Add tests with any new behavior. Keep unit tests close to the modules they validate through mirrored paths under `tests/`. Use clear names that describe behavior, for example `test_user_can_create_session` or `session-manager.spec.ts`. Include regression tests when fixing bugs.
+Add or update tests for behavior changes. Browser tests live under `apps/browser/src/__tests__/`, server tests under `apps/server/src/test/`, and daemon tests under `apps/client-daemon/tests/`.
+
+For cross-component behavior, cover the owning boundary first: C-side tools in Rust tests, S-side routing/state in Java tests, and B-side rendering/interaction in React tests.
 
 ## Commit & Pull Request Guidelines
 
-No readable Git history is available in this workspace, so no project-specific commit convention can be inferred. Until a convention is established, use concise imperative commits such as `Add session validation` or `Fix build configuration`.
-
-Pull requests should include a short description, relevant issue links, test results, and screenshots or recordings for UI changes. Call out configuration, migration, or security implications explicitly.
+Use concise imperative commit messages such as `Add client state persistence` or `Fix model switching`. Pull requests should include a short summary, test results, UI screenshots for visual changes, and any configuration or migration notes.
 
 ## Security & Configuration Tips
 
-Do not commit secrets, local credentials, dependency caches, or generated artifacts. Provide sample configuration files such as `.env.example` when environment variables become required.
+Never commit API keys, passwords, local `~/.brainx` state, logs, screenshots, or private agent notes. Use placeholder examples in `.env.example` and `env:VARIABLE_NAME` references in daemon configuration.

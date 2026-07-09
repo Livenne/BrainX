@@ -176,7 +176,7 @@ export const skillDrafts: SkillDraft[] = [
 export const daemons: ClientDaemon[] = [
   {
     id: 'cd_local',
-    name: 'brainx-client-local',
+    name: 'Livenne Workstation',
     deviceName: 'Livenne Workstation',
     os: 'Ubuntu 24.04 / WSL',
     status: 'online',
@@ -195,6 +195,7 @@ export const chatSessions: ChatSession[] = [
     title: 'Browser workbench run',
     workspaceName: workspace.name,
     currentWorkspace: '~/.brainx/workspace',
+    clientDaemonId: daemons[0].id,
     agentId: 'agent_frontend',
     agentName: 'frontend-main',
     branchName: 'mainline',
@@ -202,6 +203,25 @@ export const chatSessions: ChatSession[] = [
     clientName: daemons[0].name,
     runId: 'run_8f3a',
     runStatus: 'waiting_for_approval',
+    activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+    availableModels: [
+      {
+        name: 'nvidia:stepfun-ai/step-3.7-flash',
+        key: 'nvidia:stepfun-ai/step-3.7-flash',
+        providerName: 'nvidia',
+        model: 'stepfun-ai/step-3.7-flash',
+        protocol: 'openai',
+        contextWindow: 128000
+      },
+      {
+        name: 'gpt:gpt-5.5',
+        key: 'gpt:gpt-5.5',
+        providerName: 'gpt',
+        model: 'gpt-5.5',
+        protocol: 'openai',
+        contextWindow: 128000
+      }
+    ],
     todos: [
       { id: 'todo_context', label: 'Map AppShell and Chat route contracts', status: 'completed' },
       { id: 'todo_tokens', label: 'Replace ad hoc color tokens with brand-derived tokens', status: 'running' },

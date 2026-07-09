@@ -1,0 +1,3 @@
+brainx:
+  state:
+    sqlite-path: ${java.io.tmpdir}/brainx-server-test-${random.uuid}.sqlite

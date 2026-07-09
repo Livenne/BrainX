@@ -79,6 +79,8 @@ pub struct SyncWorkspaceItem<'a> {
 pub struct RegisterDaemonRequest<'a> {
     pub workspace_id: &'a str,
     pub device_name: &'a str,
+    pub operating_system: &'a str,
+    pub installation_id: &'a str,
     pub capabilities: Vec<&'a str>,
 }
 
@@ -86,7 +88,16 @@ pub struct RegisterDaemonRequest<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct RegisterDaemonResponse {
     pub id: String,
+    pub workspace_id: Option<String>,
+    pub user_id: Option<String>,
+    pub installation_id: Option<String>,
+    pub client_token: String,
+    pub device_name: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub bound_at: Option<String>,
+    pub last_heartbeat_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -94,6 +105,8 @@ pub struct RegisterDaemonResponse {
 pub struct ExecutionRequest {
     pub execution_id: String,
     pub workspace_id: String,
+    #[serde(default)]
+    pub client_daemon_id: String,
     pub agent_id: String,
     pub branch_id: String,
     pub run_id: String,

@@ -10,6 +10,7 @@ import {
   createChatSession,
   deleteChatSession,
   forkChatSession,
+  getClientDaemons,
   getSkillInventory,
   getChatSessions,
   renameChatSession,
@@ -25,6 +26,7 @@ vi.mock('../services/mockApi', () => ({
   createChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
   forkChatSession: vi.fn(),
+  getClientDaemons: vi.fn().mockResolvedValue([{ id: 'cd_local', deviceName: 'Livenne Workstation', status: 'online' }]),
   getSkillInventory: vi.fn(),
   getChatSessions: vi.fn(),
   renameChatSession: vi.fn(),
@@ -35,12 +37,21 @@ vi.mock('../services/mockApi', () => ({
 vi.mock('../services/brainxApi', () => ({
   answerAskUser: vi.fn(),
   approveToolRequest: vi.fn(),
+  cancelChatSession: vi.fn(),
+  createChatSession: vi.fn(),
+  deleteChatSession: vi.fn(),
+  forkChatSession: vi.fn(),
+  getClientDaemons: vi.fn(),
   getChatSession: vi.fn(),
+  getChatSessionById: vi.fn(),
   getChatSessions: vi.fn(),
   getSkillInventory: vi.fn(),
   pollChatSession: vi.fn(),
   rejectToolRequest: vi.fn(),
+  renameChatSession: vi.fn(),
   sendChatCommand: vi.fn(),
+  sendSessionChatCommand: vi.fn(),
+  sendSessionChatMessage: vi.fn(),
   sendChatMessage: vi.fn(),
   subscribeChatEvents: vi.fn()
 }));
@@ -75,11 +86,11 @@ const baseSession: ChatSession = {
   ]
 };
 
-function renderChat(session: ChatSession = baseSession) {
-  renderChatSessions([session]);
+function renderChat(session: ChatSession = baseSession, path = '/workspaces/w_core/chat') {
+  renderChatSessions([session], path);
 }
 
-function renderChatSessions(sessions: ChatSession[]) {
+function renderChatSessions(sessions: ChatSession[], path = '/workspaces/w_core/chat') {
   const firstSession = sessions[0] ?? { ...baseSession, id: 'chat_created', title: null, messages: [] };
   vi.mocked(getChatSessions).mockResolvedValue(sessions);
   vi.mocked(createChatSession).mockResolvedValue(firstSession);
@@ -123,7 +134,7 @@ function renderChatSessions(sessions: ChatSession[]) {
   render(
     <ThemeProvider>
       <AuthProvider>
-        <MemoryRouter initialEntries={['/workspaces/w_core/chat']}>
+        <MemoryRouter initialEntries={[path]}>
           <Routes>
             <Route path="/workspaces/:workspaceId/chat" element={<ChatPage />} />
           </Routes>
@@ -183,10 +194,25 @@ describe('chat interaction polish', () => {
 
     const listbox = screen.getByRole('listbox', { name: 'Chat sessions' });
     expect(within(listbox).getByRole('option', { name: 'New chat' })).toBeInTheDocument();
-    await user.keyboard('{ArrowDown}{ArrowDown}{Enter}');
+    await user.keyboard('{ArrowDown}{Enter}');
 
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Chat sessions' })).toHaveTextContent('Design review'));
     expect(screen.queryByRole('listbox', { name: 'Chat sessions' })).not.toBeInTheDocument();
+  });
+
+  it('shows a no-client empty state and does not create sessions when no client is bound', async () => {
+    const user = userEvent.setup();
+    vi.mocked(getClientDaemons).mockResolvedValueOnce([]);
+    renderChatSessions([]);
+
+    expect(await screen.findByText('Bind a client to start chat')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Client page' })).toHaveAttribute('href', '/workspaces/w_core/client-daemons');
+
+    await user.type(screen.getByRole('textbox', { name: 'Message brainx' }), 'Inspect workspace');
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+
+    expect(createChatSession).not.toHaveBeenCalled();
+    expect(sendChatMessage).not.toHaveBeenCalled();
   });
 
   it('renders legacy get_environment as Environment with no placeholder summary', async () => {
@@ -235,10 +261,10 @@ describe('chat interaction polish', () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia-step',
+      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
       availableModels: [
-        { name: 'nvidia-step', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt-5.5', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
+        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
       ]
     });
     await selectSession(user);
@@ -248,9 +274,31 @@ describe('chat interaction polish', () => {
     await user.keyboard('{Enter}');
     await user.keyboard('{ArrowDown}{Enter}');
 
-    await waitFor(() => expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt-5.5'));
-    expect(await screen.findByText('模型已切换到 gpt-5.5')).toBeInTheDocument();
-    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt-5.5' }, 'chat_main');
+    await waitFor(() => expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt:gpt-5.5'));
+    expect(await screen.findByText('模型已切换到 gpt:gpt-5.5')).toBeInTheDocument();
+    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt:gpt-5.5' }, 'chat_main');
+  });
+
+  it('switches model from a pointer selection without submitting the active model again', async () => {
+    const user = userEvent.setup();
+    renderChat({
+      ...baseSession,
+      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
+      availableModels: [
+        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
+        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
+      ]
+    });
+    await selectSession(user);
+
+    const composer = await screen.findByRole('textbox', { name: 'Message brainx' });
+    await user.type(composer, '/模型');
+    await user.keyboard('{Enter}');
+    await user.click(await screen.findByRole('option', { name: /gpt:gpt-5\.5/ }));
+
+    await waitFor(() => expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt:gpt-5.5' }, 'chat_main'));
+    expect(sendChatCommand).not.toHaveBeenCalledWith('w_core', 'model', { modelName: 'nvidia:stepfun-ai/step-3.7-flash' }, 'chat_main');
+    expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt:gpt-5.5');
   });
 
   it('opens a workdir dialog with the current workspace path and submits workspace command', async () => {
@@ -347,6 +395,7 @@ describe('chat interaction polish', () => {
           id: 'notice_clear',
           kind: 'context_cleared',
           message: '已清空上下文',
+          afterMessageIndex: 0,
           createdAt: '2026-07-08T00:01:00.000Z'
         }
       ]
@@ -362,25 +411,111 @@ describe('chat interaction polish', () => {
 
     expect(await screen.findByText('已清空上下文')).toBeInTheDocument();
     expect(screen.queryByText('Copy this message')).not.toBeInTheDocument();
-    expect(screen.getByText('提示上下文')).toBeInTheDocument();
+    expect(screen.queryByText('提示上下文')).not.toBeInTheDocument();
+  });
+
+  it('keeps command notices at their original timeline position after new messages arrive', async () => {
+    const user = userEvent.setup();
+    renderChat({
+      ...baseSession,
+      messages: [
+        { role: 'user', content: 'Before model switch' },
+        { role: 'assistant', content: 'Before response' },
+        { role: 'user', content: 'After model switch' },
+        { role: 'assistant', content: 'After response' }
+      ],
+      timelineNotices: [
+        {
+          id: 'notice_model',
+          kind: 'model_changed',
+          message: '已切换模型：gpt-5.5',
+          detail: 'gpt-5.5',
+          afterMessageIndex: 2,
+          createdAt: '2026-07-08T00:01:00.000Z'
+        }
+      ]
+    });
+    await selectSession(user);
+
+    const stream = await screen.findByRole('log', { name: 'Agent loop timeline' });
+    const texts = within(stream)
+      .getAllByText(/Before model switch|Before response|已切换模型：gpt-5\.5|After model switch|After response/)
+      .map((node) => node.textContent);
+
+    expect(texts).toEqual(['Before model switch', 'Before response', '已切换模型：gpt-5.5', 'After model switch', 'After response']);
+  });
+
+  it('does not append legacy command notices without anchors to the bottom of the timeline', async () => {
+    const user = userEvent.setup();
+    renderChat({
+      ...baseSession,
+      messages: [
+        { role: 'user', content: 'First message' },
+        { role: 'assistant', content: 'First response' },
+        { role: 'user', content: 'Second message' },
+        { role: 'assistant', content: 'Second response' }
+      ],
+      timelineNotices: [
+        {
+          id: 'notice_legacy_model',
+          kind: 'model_changed',
+          message: '已切换模型：gpt-5.5',
+          detail: 'gpt-5.5',
+          createdAt: '2026-07-08T00:01:00.000Z'
+        }
+      ]
+    });
+    await selectSession(user);
+
+    const stream = await screen.findByRole('log', { name: 'Agent loop timeline' });
+    const texts = within(stream)
+      .getAllByText(/已切换模型：gpt-5\.5|First message|First response|Second message|Second response/)
+      .map((node) => node.textContent);
+
+    expect(texts).toEqual(['已切换模型：gpt-5.5', 'First message', 'First response', 'Second message', 'Second response']);
+  });
+
+  it('removes the failed user bubble before retrying that message', async () => {
+    const user = userEvent.setup();
+    renderChat({
+      ...baseSession,
+      messages: [
+        { role: 'user', content: 'Retry this command', status: 'failed', error: { code: 'send_failed', message: 'HTTP 429: Too Many Requests' } },
+        { role: 'assistant', content: 'Earlier successful answer' }
+      ]
+    });
+    vi.mocked(sendChatMessage).mockResolvedValueOnce({
+      ...baseSession,
+      messages: [
+        { role: 'user', content: 'Retry this command' },
+        { role: 'assistant', content: 'Retry succeeded' }
+      ]
+    });
+    await selectSession(user);
+
+    await user.click(await screen.findByRole('button', { name: 'Retry message' }));
+
+    expect(await screen.findByText('Retry succeeded')).toBeInTheDocument();
+    expect(screen.queryByText('HTTP 429: Too Many Requests')).not.toBeInTheDocument();
+    expect(screen.getAllByText('Retry this command')).toHaveLength(1);
   });
 
   it('does not claim a model switch succeeded when the server returns the old active model', async () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia-step',
+      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
       availableModels: [
-        { name: 'nvidia-step', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt-5.5', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
+        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
       ]
     });
     vi.mocked(sendChatCommand).mockResolvedValueOnce({
       ...baseSession,
-      activeModelName: 'nvidia-step',
+      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
       availableModels: [
-        { name: 'nvidia-step', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
-        { name: 'gpt-5.5', model: 'gpt-5.5', protocol: 'openai' }
+        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai' },
+        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai' }
       ]
     });
     await selectSession(user);
@@ -390,8 +525,8 @@ describe('chat interaction polish', () => {
     await user.keyboard('{Enter}');
     await user.keyboard('{ArrowDown}{Enter}');
 
-    expect(await screen.findByText('模型切换未生效：服务器返回 nvidia-step')).toBeInTheDocument();
-    expect(screen.queryByText('模型已切换到 nvidia-step')).not.toBeInTheDocument();
+    expect(await screen.findByText('模型切换未生效：服务器返回 nvidia:stepfun-ai/step-3.7-flash')).toBeInTheDocument();
+    expect(screen.queryByText('模型已切换到 nvidia:stepfun-ai/step-3.7-flash')).not.toBeInTheDocument();
   });
 
   it('opens row actions for a non-selected session without switching sessions', async () => {
@@ -422,9 +557,42 @@ describe('chat interaction polish', () => {
     await selectSession(user);
 
     expect(await screen.findByRole('region', { name: 'Skills' })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(getSkillInventory).toHaveBeenLastCalledWith('w_core', {
+        clientDaemonId: 'cd_local',
+        currentWorkspace: '~/.brainx/workspace'
+      });
+    });
+    expect(screen.getByText('Project skills')).toBeInTheDocument();
+    expect(screen.queryByText('Current workspace')).not.toBeInTheDocument();
     expect(screen.getByText('debug-rust')).toBeInTheDocument();
     expect(screen.getByText('Debug Rust failures')).toBeInTheDocument();
     expect(screen.getByText('write-plan')).toBeInTheDocument();
+  });
+
+  it('reloads chat skills when switching to a session with a different workdir', async () => {
+    const user = userEvent.setup();
+    renderChatSessions([
+      baseSession,
+      {
+        ...baseSession,
+        id: 'chat_docs',
+        title: 'Docs session',
+        currentWorkspace: '/home/Livenne/code/brainx/docs',
+        messages: []
+      }
+    ]);
+    await selectSession(user, 'Test session');
+
+    await user.click(await screen.findByRole('combobox', { name: 'Chat sessions' }));
+    await user.click(await screen.findByRole('option', { name: 'Docs session' }));
+
+    await waitFor(() => {
+      expect(getSkillInventory).toHaveBeenLastCalledWith('w_core', {
+        clientDaemonId: 'cd_local',
+        currentWorkspace: '/home/Livenne/code/brainx/docs'
+      });
+    });
   });
 
   it('renders command tool details as terminal output instead of raw result fields', async () => {
@@ -466,6 +634,60 @@ describe('chat interaction polish', () => {
     expect(within(details).queryByText('ok')).not.toBeInTheDocument();
     expect(within(details).queryByText('exitCode')).not.toBeInTheDocument();
     expect(within(details).queryByText('stderrTruncated')).not.toBeInTheDocument();
+  });
+
+  it('renders web search results as answer and source summaries', async () => {
+    const user = userEvent.setup();
+    renderChat({
+      ...baseSession,
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'call_web',
+              type: 'function',
+              function: {
+                name: 'web_search',
+                arguments: JSON.stringify({ query: 'Tavily search API docs', maxResults: 2 })
+              }
+            }
+          ]
+        },
+        {
+          role: 'tool',
+          tool_call_id: 'call_web',
+          name: 'web_search',
+          content: JSON.stringify({
+            ok: true,
+            result: {
+              query: 'Tavily search API docs',
+              answer: 'Tavily Search returns ranked web results.',
+              results: [
+                {
+                  title: 'Search API',
+                  url: 'https://docs.tavily.com/documentation/api-reference/endpoint/search',
+                  content: 'POST /search accepts query, search_depth, topic and max_results.',
+                  score: 0.97
+                }
+              ],
+              truncated: false
+            }
+          })
+        }
+      ]
+    });
+    await selectSession(user);
+
+    await user.click(await screen.findByRole('button', { name: 'Web Search Tavily search API docs' }));
+    const details = screen.getByRole('region', { name: 'web_search details' });
+
+    expect(within(details).getByText('Tavily Search returns ranked web results.')).toBeInTheDocument();
+    expect(within(details).getByText('Search API')).toBeInTheDocument();
+    expect(within(details).getByText('https://docs.tavily.com/documentation/api-reference/endpoint/search')).toBeInTheDocument();
+    expect(within(details).getByText('POST /search accepts query, search_depth, topic and max_results.')).toBeInTheDocument();
+    expect(within(details).queryByText('score')).not.toBeInTheDocument();
   });
 
   it('derives the left rail todo and terminal state from standard tool result messages', async () => {
@@ -688,10 +910,10 @@ describe('chat interaction polish', () => {
     const user = userEvent.setup();
     renderChat({
       ...baseSession,
-      activeModelName: 'nvidia-step',
+      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
       availableModels: [
-        { name: 'nvidia-step', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai', contextWindow: 128000 },
-        { name: 'local-qwen', model: 'qwen/qwen3-coder', protocol: 'openai', contextWindow: 64000 }
+        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai', contextWindow: 128000 },
+        { name: 'local:qwen/qwen3-coder', providerName: 'local', model: 'qwen/qwen3-coder', protocol: 'openai', contextWindow: 64000 }
       ]
     });
     await selectSession(user);
@@ -712,7 +934,7 @@ describe('chat interaction polish', () => {
     const modelList = await screen.findByRole('listbox', { name: 'Model options' });
     await user.keyboard('{ArrowDown}{Enter}');
 
-    await waitFor(() => expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', expect.objectContaining({ modelName: 'local-qwen' }), 'chat_main'));
+    await waitFor(() => expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', expect.objectContaining({ modelName: 'local:qwen/qwen3-coder' }), 'chat_main'));
     expect(modelList).not.toBeInTheDocument();
   });
 
@@ -873,14 +1095,27 @@ describe('chat interaction polish', () => {
     expect(screen.queryByText(/404/)).not.toBeInTheDocument();
   });
 
+  it('labels session state and shows the current working directory in the side rails', async () => {
+    const user = userEvent.setup();
+    renderChat({
+      ...baseSession,
+      currentWorkspace: '/home/Livenne/.brainx/workspace/test'
+    });
+    await selectSession(user);
+
+    const rail = await screen.findByRole('complementary', { name: 'Session state' });
+    expect(within(rail).getByRole('heading', { name: 'Session' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Current working directory' })).toHaveTextContent('/home/Livenne/.brainx/workspace/test');
+  });
+
   it('creates a real session before switching models from an empty chat page', async () => {
     const user = userEvent.setup();
     const listedSession = {
       ...baseSession,
-      activeModelName: 'nvidia-step',
+      activeModelName: 'nvidia:stepfun-ai/step-3.7-flash',
       availableModels: [
-        { name: 'nvidia-step', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai', contextWindow: 128000 },
-        { name: 'gpt-5.5', model: 'gpt-5.5', protocol: 'openai', contextWindow: 128000 }
+        { name: 'nvidia:stepfun-ai/step-3.7-flash', providerName: 'nvidia', model: 'stepfun-ai/step-3.7-flash', protocol: 'openai', contextWindow: 128000 },
+        { name: 'gpt:gpt-5.5', providerName: 'gpt', model: 'gpt-5.5', protocol: 'openai', contextWindow: 128000 }
       ]
     };
     const createdSession = {
@@ -889,11 +1124,11 @@ describe('chat interaction polish', () => {
       title: null,
       messages: []
     };
-    renderChatSessions([listedSession]);
+    renderChatSessions([listedSession], '/workspaces/w_core/chat?sessionId=new');
     vi.mocked(createChatSession).mockResolvedValue(createdSession);
     vi.mocked(sendChatCommand).mockResolvedValue({
       ...createdSession,
-      activeModelName: 'gpt-5.5'
+      activeModelName: 'gpt:gpt-5.5'
     });
 
     const composer = await screen.findByRole('textbox', { name: 'Message brainx' });
@@ -902,7 +1137,7 @@ describe('chat interaction polish', () => {
     await user.keyboard('{ArrowDown}{Enter}');
 
     await waitFor(() => expect(createChatSession).toHaveBeenCalledWith('w_core'));
-    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt-5.5' }, 'chat_created');
-    expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt-5.5');
+    expect(sendChatCommand).toHaveBeenCalledWith('w_core', 'model', { modelName: 'gpt:gpt-5.5' }, 'chat_created');
+    expect(screen.getByLabelText('Current model')).toHaveTextContent('gpt:gpt-5.5');
   });
 });

@@ -6,6 +6,7 @@ import type {
   ChatSession,
   ChatAttachmentInput,
   ClientDaemon,
+  DashboardData,
   ExecutionEvent,
   SkillInventory,
   SkillProposal,
@@ -25,16 +26,30 @@ export async function getChatSessionById(workspaceId: string, sessionId: string)
   );
 }
 
-export async function getChatSessions(workspaceId: string): Promise<ChatSession[]> {
-  return requestJson<ChatSession[]>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions`, jsonInit());
+export async function getChatSessions(workspaceId: string, clientDaemonId?: string): Promise<ChatSession[]> {
+  const params = clientDaemonId ? `?${new URLSearchParams({ clientDaemonId }).toString()}` : '';
+  return requestJson<ChatSession[]>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions${params}`, jsonInit());
 }
 
-export async function getSkillInventory(workspaceId: string): Promise<SkillInventory> {
-  return requestJson<SkillInventory>(`/workspaces/${encodeURIComponent(workspaceId)}/skills`, jsonInit());
+export type SkillInventoryOptions = {
+  clientDaemonId?: string;
+  currentWorkspace?: string;
+};
+
+export async function getSkillInventory(workspaceId: string, options?: SkillInventoryOptions): Promise<SkillInventory> {
+  const params = new URLSearchParams();
+  if (options?.clientDaemonId) params.set('clientDaemonId', options.clientDaemonId);
+  if (options?.currentWorkspace) params.set('currentWorkspace', options.currentWorkspace);
+  const query = params.toString();
+  return requestJson<SkillInventory>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/skills${query ? `?${query}` : ''}`,
+    jsonInit()
+  );
 }
 
-export async function getSkillProposals(): Promise<SkillProposal[]> {
-  return requestJson<SkillProposal[]>('/skill-proposals', jsonInit());
+export async function getSkillProposals(workspaceId?: string): Promise<SkillProposal[]> {
+  const params = workspaceId ? `?${new URLSearchParams({ workspaceId }).toString()}` : '';
+  return requestJson<SkillProposal[]>(`/skill-proposals${params}`, jsonInit());
 }
 
 export async function approveSkillProposal(proposalId: string): Promise<SkillProposal> {
@@ -53,16 +68,24 @@ export async function rejectSkillProposal(proposalId: string): Promise<SkillProp
   });
 }
 
-export async function createChatSession(workspaceId: string, title?: string): Promise<ChatSession> {
+export async function createChatSession(workspaceId: string, title?: string, clientDaemonId?: string): Promise<ChatSession> {
+  const body = {
+    ...(title ? { title } : {}),
+    ...(clientDaemonId ? { clientDaemonId } : {})
+  };
   return requestJson<ChatSession>(`/workspaces/${encodeURIComponent(workspaceId)}/chat/sessions`, {
     method: 'POST',
     headers: jsonHeaders(),
-    body: JSON.stringify(title ? { title } : {})
+    body: JSON.stringify(body)
   });
 }
 
 export async function getWorkspaces(token: string): Promise<Workspace[]> {
   return requestJson<Workspace[]>('/workspaces', jsonInit(token));
+}
+
+export async function getDashboard(token: string, workspaceId: string): Promise<DashboardData> {
+  return requestJson<DashboardData>(`/workspaces/${encodeURIComponent(workspaceId)}/dashboard`, jsonInit(token));
 }
 
 export async function sendChatMessage(
@@ -357,10 +380,13 @@ type ServerClientDaemon = {
   workspaceId: string;
   userId?: string | null;
   deviceName: string;
+  os?: string;
+  operatingSystem?: string;
   status: ClientDaemon['status'];
   capabilities: string[];
   boundAt?: string;
   lastHeartbeatAt?: string;
+  workspacePath?: string;
 };
 
 function toClientDaemon(daemon: ServerClientDaemon): ClientDaemon {
@@ -371,9 +397,9 @@ function toClientDaemon(daemon: ServerClientDaemon): ClientDaemon {
     id: daemon.id,
     workspaceId: daemon.workspaceId,
     userId: daemon.userId ?? null,
-    name: 'brainx client',
+    name: daemon.deviceName || daemon.id,
     deviceName: daemon.deviceName,
-    os: 'Local device',
+    os: daemon.os || daemon.operatingSystem || '',
     status: daemon.status,
     version: '0.1.0',
     activeTasks: 0,
@@ -382,7 +408,7 @@ function toClientDaemon(daemon: ServerClientDaemon): ClientDaemon {
     registeredAt: daemon.boundAt ?? daemon.lastHeartbeatAt ?? new Date().toISOString(),
     boundAt: daemon.boundAt,
     lastHeartbeatAt: daemon.lastHeartbeatAt,
-    workspacePath: daemon.workspaceId,
+    workspacePath: daemon.workspacePath ?? '',
     capabilities: daemon.capabilities
   };
 }

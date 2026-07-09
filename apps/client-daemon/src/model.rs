@@ -1,22 +1,35 @@
-use crate::auth::ClientConfig;
+use crate::auth::{resolve_secret_value, ClientConfig, ClientProviderConfig};
 use crate::tools::default_tool_schemas;
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
 const DEFAULT_MODEL: &str = "stepfun-ai/step-3.7-flash";
-const DEFAULT_MODEL_NAME: &str = "nvidia-step";
+const DEFAULT_PROVIDER_NAME: &str = "nvidia";
+const DEFAULT_MODEL_KEY: &str = "nvidia:stepfun-ai/step-3.7-flash";
 const DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
 
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     pub name: String,
+    pub provider_name: String,
     pub api_key: String,
     pub model: String,
     pub base_url: String,
     pub protocol: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCatalogEntry {
+    pub key: String,
+    pub provider_name: String,
+    pub model: String,
+    pub protocol: String,
+    pub context_window: Option<u32>,
 }
 
 impl ModelConfig {
@@ -37,7 +50,8 @@ impl ModelConfig {
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| anyhow!("NVIDIA_API_KEY is required for model.invoke"))?;
         Ok(Self {
-            name: DEFAULT_MODEL_NAME.to_string(),
+            name: DEFAULT_MODEL_KEY.to_string(),
+            provider_name: DEFAULT_PROVIDER_NAME.to_string(),
             api_key,
             model: model
                 .filter(|value| !value.trim().is_empty())
@@ -50,15 +64,88 @@ impl ModelConfig {
     }
 
     pub fn from_client_config(config: &ClientConfig, requested_model_name: Option<&str>) -> Result<Self> {
-        let model = config.model_config(requested_model_name)?;
+        let selected = requested_model_name
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(DEFAULT_MODEL_KEY);
+        let (provider_name, model_id) = selected
+            .split_once(':')
+            .ok_or_else(|| anyhow!("modelName must use provider:model format"))?;
+        if provider_name.trim().is_empty() || model_id.trim().is_empty() {
+            return Err(anyhow!("modelName must use provider:model format"));
+        }
+        let provider = config.provider_config(provider_name)?;
         Ok(Self {
-            name: model.name.clone(),
-            api_key: resolve_api_key(&model.api_key)?,
-            model: model.model.clone(),
-            base_url: model.base_url.clone(),
-            protocol: model.protocol.clone(),
+            name: selected.to_string(),
+            provider_name: provider.name.clone(),
+            api_key: resolve_api_key(&provider.api_key)?,
+            model: model_id.to_string(),
+            base_url: provider.base_url.clone(),
+            protocol: provider.protocol.clone(),
         })
     }
+}
+
+pub async fn discover_provider_models(
+    provider: &ClientProviderConfig,
+    context_overrides: &HashMap<String, u32>,
+) -> Result<Vec<ModelCatalogEntry>> {
+    let api_key = resolve_api_key(&provider.api_key)?;
+    let http = Client::new();
+    let url = format!("{}/models", provider.base_url.trim_end_matches('/'));
+    let mut request = http.get(url);
+    if provider.protocol == "anthropic" {
+        request = request
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        request = request.bearer_auth(&api_key);
+    }
+    let response = request
+        .send()
+        .await
+        .context("failed to list provider models")?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read provider models response")?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "provider models returned HTTP {}: {}",
+            status.as_u16(),
+            response_excerpt(&body, &api_key)
+        ));
+    }
+    let payload: Value = serde_json::from_str(&body)
+        .context("failed to decode provider models response")?;
+    let mut models = Vec::new();
+    if let Some(items) = payload.get("data").and_then(Value::as_array) {
+        for item in items {
+            let Some(model_id) = item.get("id").and_then(Value::as_str).filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            models.push(ModelCatalogEntry {
+                key: format!("{}:{}", provider.name, model_id),
+                provider_name: provider.name.clone(),
+                model: model_id.to_string(),
+                protocol: provider.protocol.clone(),
+                context_window: context_overrides
+                    .get(&format!("{}:{}", provider.name, model_id))
+                    .copied()
+                    .or_else(|| context_window_from_model_item(item)),
+            });
+        }
+    }
+    Ok(models)
+}
+
+fn context_window_from_model_item(item: &Value) -> Option<u32> {
+    item.get("context_window")
+        .or_else(|| item.get("contextWindow"))
+        .or_else(|| item.get("max_context_length"))
+        .or_else(|| item.get("max_input_tokens"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
 }
 
 #[derive(Debug, Clone)]
@@ -238,16 +325,7 @@ fn response_excerpt(body: &str, api_key: &str) -> String {
 }
 
 fn resolve_api_key(value: &str) -> Result<String> {
-    if let Some(name) = value.strip_prefix("env:") {
-        return std::env::var(name).with_context(|| format!("{name} is required for model.invoke"));
-    }
-    if let Some(literal) = value.strip_prefix("literal:") {
-        return Ok(literal.to_string());
-    }
-    if value.trim().is_empty() {
-        return Err(anyhow!("model apiKey must not be empty"));
-    }
-    Ok(value.to_string())
+    resolve_secret_value(value, "model.invoke")
 }
 
 pub fn build_openai_chat_payload(model: &str, input: &Value) -> Result<Value> {
@@ -546,7 +624,9 @@ fn outgoing_tool_call_name(object: &Map<String, Value>) -> Result<&str> {
         .get("name")
         .and_then(Value::as_str)
         .or_else(|| outgoing_tool_call_function(object).and_then(|function| function.get("name")).and_then(Value::as_str))
-        .ok_or_else(|| anyhow!("tool call requires name"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow!("tool call requires non-empty name"))
 }
 
 fn outgoing_tool_call_arguments(object: &Map<String, Value>) -> Option<Value> {
@@ -571,16 +651,18 @@ fn normalize_model_response(response: &Value, protocol: &str) -> Result<Value> {
         .get("role")
         .and_then(Value::as_str)
         .unwrap_or("assistant");
-    let content = message
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let content = incoming_assistant_text(message.get("content"));
     let thinking = first_reasoning_value(message).unwrap_or_default();
-    let tool_calls = message
+    let mut tool_calls = message
         .get("tool_calls")
         .and_then(Value::as_array)
-        .map(|calls| calls.iter().map(normalize_incoming_tool_call).collect::<Vec<_>>())
+        .map(|calls| calls.iter().map(normalize_incoming_tool_call).collect::<Result<Vec<_>>>())
+        .transpose()?
         .unwrap_or_default();
+    if let Some(function_call) = message.get("function_call").filter(|value| value.is_object()) {
+        tool_calls.push(normalize_legacy_function_call(function_call)?);
+    }
+    tool_calls.extend(incoming_content_tool_calls(message.get("content"))?);
 
     Ok(json!({
         "message": {
@@ -635,20 +717,195 @@ fn normalize_anthropic_response(response: &Value) -> Result<Value> {
     }))
 }
 
-fn normalize_incoming_tool_call(call: &Value) -> Value {
-    let function = call.get("function").unwrap_or(&Value::Null);
-    let raw_arguments = function
-        .get("arguments")
+fn incoming_assistant_text(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(incoming_content_text_part)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Some(value @ Value::Object(_)) => incoming_content_text_part(value).unwrap_or_default(),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn incoming_content_parts(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(parts) => parts.iter().collect(),
+        Value::Object(_) => vec![value],
+        _ => Vec::new(),
+    }
+}
+
+fn incoming_stream_content_text_parts(value: &Value) -> Vec<String> {
+    incoming_content_parts(value)
+        .into_iter()
+        .filter_map(incoming_content_text_part)
+        .collect()
+}
+
+fn incoming_content_text_part(value: &Value) -> Option<String> {
+    let object = value.as_object()?;
+    let block_type = object.get("type").and_then(Value::as_str).unwrap_or("");
+    if matches!(block_type, "text" | "output_text" | "message") || object.contains_key("text") {
+        return object
+            .get("text")
+            .or_else(|| object.get("content"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+    }
+    None
+}
+
+fn incoming_content_tool_calls(value: Option<&Value>) -> Result<Vec<Value>> {
+    match value {
+        Some(Value::Array(parts)) => parts.iter().filter_map(normalize_content_tool_call).collect(),
+        Some(value @ Value::Object(_)) => match normalize_content_tool_call(value) {
+            Some(tool_call) => Ok(vec![tool_call?]),
+            None => Ok(Vec::new()),
+        },
+        _ => Ok(Vec::new()),
+    }
+}
+
+fn normalize_content_tool_call(value: &Value) -> Option<Result<Value>> {
+    let object = value.as_object()?;
+    let block_type = object.get("type").and_then(Value::as_str).unwrap_or("");
+    let is_tool = matches!(
+        block_type,
+        "tool_call" | "function_call" | "tool_use" | "custom_tool_call" | "custom"
+    ) || object.contains_key("function")
+        || object.contains_key("functionCall")
+        || object.contains_key("toolName")
+        || object.contains_key("tool_name")
+        || object.contains_key("function_name");
+    is_tool.then(|| normalize_incoming_tool_call(value))
+}
+
+fn normalize_incoming_tool_call(call: &Value) -> Result<Value> {
+    let object = call
+        .as_object()
+        .ok_or_else(|| anyhow!("tool call must be an object"))?;
+    let name = incoming_tool_call_name(object)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| anyhow!("tool call is missing a function name"))?;
+    Ok(json!({
+        "id": incoming_tool_call_id(object),
+        "name": name,
+        "arguments": incoming_tool_call_arguments(object),
+    }))
+}
+
+fn normalize_legacy_function_call(call: &Value) -> Result<Value> {
+    let object = call
+        .as_object()
+        .ok_or_else(|| anyhow!("function_call must be an object"))?;
+    let name = incoming_tool_call_name(object)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| anyhow!("tool call is missing a function name"))?;
+    Ok(json!({
+        "id": call.get("id").and_then(Value::as_str).unwrap_or("call_function_call"),
+        "name": name,
+        "arguments": incoming_tool_call_arguments(object),
+    }))
+}
+
+fn incoming_tool_call_id(object: &Map<String, Value>) -> String {
+    object
+        .get("id")
+        .or_else(|| object.get("tool_call_id"))
+        .or_else(|| object.get("toolCallId"))
         .and_then(Value::as_str)
-        .unwrap_or("{}");
-    json!({
-        "id": call.get("id").and_then(Value::as_str).unwrap_or(""),
-        "name": function.get("name").and_then(Value::as_str).unwrap_or(""),
-        "arguments": parse_arguments(raw_arguments),
-    })
+        .unwrap_or("")
+        .to_string()
+}
+
+fn incoming_tool_call_name(object: &Map<String, Value>) -> Option<String> {
+    string_field(object, &["name", "toolName", "tool_name", "function_name"])
+        .or_else(|| nested_object(object, "function").and_then(|function| string_field(function, &["name", "function_name"])))
+        .or_else(|| nested_object(object, "functionCall").and_then(|function| string_field(function, &["name", "function_name"])))
+        .or_else(|| {
+            incoming_argument_candidates(object)
+                .into_iter()
+                .map(|arguments| incoming_arguments_to_value(Some(arguments)))
+                .find_map(|arguments| {
+                    arguments
+                        .as_object()
+                        .and_then(|argument_object| string_field(argument_object, &["name", "toolName", "tool_name", "function_name"]))
+                })
+        })
+}
+
+fn incoming_tool_call_arguments(object: &Map<String, Value>) -> Value {
+    let arguments = incoming_argument_candidates(object)
+        .into_iter()
+        .next()
+        .map(|value| incoming_arguments_to_value(Some(value)))
+        .unwrap_or_else(|| json!({}));
+    unwrap_arguments_envelope(arguments)
+}
+
+fn incoming_argument_candidates<'a>(object: &'a Map<String, Value>) -> Vec<&'a Value> {
+    let mut candidates = Vec::new();
+    if let Some(function) = nested_object(object, "function") {
+        if let Some(arguments) = function.get("arguments").or_else(|| function.get("input")) {
+            candidates.push(arguments);
+        }
+    }
+    if let Some(function) = nested_object(object, "functionCall") {
+        if let Some(arguments) = function.get("arguments").or_else(|| function.get("input")) {
+            candidates.push(arguments);
+        }
+    }
+    for key in ["arguments", "input", "parameters", "params"] {
+        if let Some(value) = object.get(key) {
+            candidates.push(value);
+        }
+    }
+    candidates
+}
+
+fn unwrap_arguments_envelope(arguments: Value) -> Value {
+    let Some(object) = arguments.as_object() else {
+        return arguments;
+    };
+    let has_name = string_field(object, &["name", "toolName", "tool_name", "function_name"]).is_some();
+    if !has_name {
+        return arguments;
+    }
+    object
+        .get("arguments")
+        .or_else(|| object.get("input"))
+        .or_else(|| object.get("parameters"))
+        .or_else(|| object.get("params"))
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+fn nested_object<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a Map<String, Value>> {
+    object.get(key).and_then(Value::as_object)
+}
+
+fn string_field(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
+        .map(ToString::to_string)
+}
+
+fn incoming_arguments_to_value(arguments: Option<&Value>) -> Value {
+    match arguments {
+        Some(Value::String(raw)) => parse_arguments(raw),
+        Some(Value::Null) | None => json!({}),
+        Some(value) => value.clone(),
+    }
 }
 
 fn parse_arguments(raw: &str) -> Value {
+    if raw.trim().is_empty() {
+        return json!({});
+    }
     serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
@@ -762,6 +1019,19 @@ impl StreamResponseBuilder {
                         payload: json!({"protocol": "openai"}),
                     });
                 }
+            } else if let Some(content) = delta.get("content") {
+                for text in incoming_stream_content_text_parts(content) {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    self.content.push_str(&text);
+                    events.push(ModelStreamEvent {
+                        event_type: "assistant_delta".to_string(),
+                        content_delta: text,
+                        payload: json!({"protocol": "openai"}),
+                    });
+                }
+                self.apply_openai_content_tool_calls(content)?;
             }
             for call in delta
                 .get("tool_calls")
@@ -771,20 +1041,49 @@ impl StreamResponseBuilder {
             {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let accumulator = self.tool_calls.entry(index).or_default();
-                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                let call_object = call.as_object();
+                if let Some(id) = call_object.and_then(|object| {
+                    object
+                        .get("id")
+                        .or_else(|| object.get("tool_call_id"))
+                        .or_else(|| object.get("toolCallId"))
+                        .and_then(Value::as_str)
+                }) {
                     accumulator.id = id.to_string();
                 }
-                if let Some(function) = call.get("function").and_then(Value::as_object) {
-                    if let Some(name) = function.get("name").and_then(Value::as_str) {
-                        accumulator.name = name.to_string();
+                if let Some(name) = call_object.and_then(incoming_tool_call_name) {
+                    if !name.trim().is_empty() {
+                        accumulator.name = name;
                     }
-                    if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
-                        accumulator.arguments.push_str(arguments);
-                    }
+                }
+                if let Some(arguments) = call_object.and_then(|object| incoming_argument_candidates(object).into_iter().next()) {
+                    accumulator.arguments.push_str(&arguments_to_string(arguments));
                 }
             }
         }
         Ok(events)
+    }
+
+    fn apply_openai_content_tool_calls(&mut self, content: &Value) -> Result<()> {
+        for (offset, part) in incoming_content_parts(content).into_iter().enumerate() {
+            let Some(tool_call) = normalize_content_tool_call(part) else {
+                continue;
+            };
+            let normalized = tool_call?;
+            let object = normalized
+                .as_object()
+                .ok_or_else(|| anyhow!("normalized tool call must be an object"))?;
+            let index = part
+                .get("index")
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or_else(|| self.tool_calls.len() + offset);
+            let accumulator = self.tool_calls.entry(index).or_default();
+            accumulator.id = object.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+            accumulator.name = object.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            accumulator.arguments = arguments_to_string(object.get("arguments").unwrap_or(&Value::Null));
+        }
+        Ok(())
     }
 
     fn apply_anthropic_event(&mut self, event: &Value) -> Result<Vec<ModelStreamEvent>> {
@@ -860,13 +1159,26 @@ impl StreamResponseBuilder {
             .tool_calls
             .into_values()
             .map(|call| {
-                json!({
+                let parsed_arguments = parse_arguments(&call.arguments);
+                let arguments = unwrap_arguments_envelope(parsed_arguments.clone());
+                let name = if call.name.trim().is_empty() {
+                    parsed_arguments
+                        .as_object()
+                        .and_then(|object| string_field(object, &["name", "toolName", "tool_name", "function_name"]))
+                        .unwrap_or_default()
+                } else {
+                    call.name
+                };
+                if name.trim().is_empty() {
+                    return Err(anyhow!("tool call is missing a function name"));
+                }
+                Ok(json!({
                     "id": call.id,
-                    "name": call.name,
-                    "arguments": parse_arguments(&call.arguments),
-                })
+                    "name": name,
+                    "arguments": arguments,
+                }))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         Ok(json!({
             "message": {
                 "role": "assistant",

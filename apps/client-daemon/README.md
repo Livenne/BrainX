@@ -1,25 +1,65 @@
 # brainx Client Daemon
 
-C-side local daemon prototype for brainx. It registers with the server, polls execution requests, executes safe local read tools or the mock provider, and posts structured results.
+C-side local daemon for BrainX. It registers with the S-side server, polls execution requests, calls the configured model provider, executes local tools, and streams model/tool results back to S.
+
+The daemon keeps local runtime state under `~/.brainx` on Linux/macOS or `%USERPROFILE%\.brainx` on Windows. Secrets should stay in environment variables and be referenced from `config.json` with `env:VARIABLE_NAME`.
 
 ## Commands
+
+```bash
+../../scripts/install-client.sh
+export PATH="$HOME/.brainx/bin:$PATH"
+brainx status
+brainx --server-url http://localhost:8080 start
+brainx bind
+brainx unbind --confirm
+brainx stop
+```
+
+Development commands:
 
 ```bash
 cargo test
 cargo run -- \
   --server-url http://localhost:8080 \
-  --workspace-id w_example \
-  --device-name local-dev \
-  --workspace-root /path/to/workspace
+  run-foreground
 ```
 
 Environment variables are also supported:
 
 ```bash
 BRAINX_SERVER_URL=http://localhost:8080
-BRAINX_WORKSPACE_ID=w_example
-BRAINX_DEVICE_NAME=local-dev
-BRAINX_WORKSPACE_ROOT=/path/to/workspace
+BRAINX_DEVICE_NAME="$(hostname)"
+BRAINX_POLL_INTERVAL_MS=1000
+BRAINX_CONFIG_PATH=/path/to/config.json
+```
+
+## Configuration
+
+The default config is created at `~/.brainx/config.json` and uses placeholder provider references. A typical test config looks like:
+
+```json
+{
+  "serverUrl": "http://127.0.0.1:8080",
+  "deviceName": "your-hostname",
+  "providers": [
+    {
+      "name": "nvidia",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "apiKey": "env:NVIDIA_API_KEY",
+      "protocol": "openai"
+    }
+  ],
+  "webSearch": {
+    "provider": "tavily",
+    "baseUrl": "https://api.tavily.com",
+    "apiKey": "env:TAVILY_API_KEY",
+    "timeoutSeconds": 20
+  },
+  "modelContextWindows": {
+    "nvidia:stepfun-ai/step-3.7-flash": 256000
+  }
+}
 ```
 
 ## Current Local Tools
@@ -37,9 +77,10 @@ The C-side daemon executes the local workspace tools below. S-side may add inter
 | `background_start` | `{ "name": string, "command": string, "purpose": string, "workingDirectory"?: string, "maxRuntimeSeconds"?: number }` |
 | `background_read` | `{ "taskId": string, "cursor"?: number, "maxBytes"?: number }` |
 | `background_stop` | `{ "taskId": string, "mode"?: "terminate" \| "kill" }` |
+| `web_search` | `{ "query": string, "searchDepth"?: "basic" \| "advanced", "maxResults"?: number, "includeAnswer"?: boolean }` |
 
 `ask_user` is a browser/server tool and is not dispatched to the local daemon. `mock_provider` is kept only for legacy/internal testing and is not part of the model-facing tool list.
 
-The daemon rejects workspace file access outside the configured workspace root. `run_command` is for short one-shot commands only. Long-running commands must use the background task tools, which buffer stdout/stderr, support incremental reads, allow stop control, and enforce `maxRuntimeSeconds`.
+The daemon allows read tools to inspect paths outside the current workspace, but write and command execution tools are constrained to the current workspace. `run_command` is for short one-shot commands only. Long-running commands must use the background task tools, which buffer stdout/stderr, support incremental reads, allow stop control, and enforce `maxRuntimeSeconds`.
 
 Tool results are bounded before they enter S-side context. Large `read_files` content, search previews, command streams, diffs, and background output reads are truncated with explicit `*Truncated` or `truncated` flags. Directory ignores such as `logs/` are only a defensive search filter; they are not the primary context-size control.

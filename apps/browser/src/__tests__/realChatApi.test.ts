@@ -10,6 +10,7 @@ import {
   getChatSessionById,
   getChatSessions,
   getClientDaemons,
+  getDashboard,
   getWorkspaces,
   getRunEvents,
   loginUser,
@@ -90,9 +91,9 @@ describe('brainx real chat API', () => {
     });
     vi.stubGlobal('fetch', fetch);
 
-    await getChatSessions('w_core');
+    await getChatSessions('w_core', 'cd_1');
     await getChatSessionById('w_core', 'chat_new');
-    await createChatSession('w_core');
+    await createChatSession('w_core', undefined, 'cd_1');
     await sendSessionChatMessage('w_core', 'chat_new', 'Hello session');
     await sendSessionChatCommand('w_core', 'chat_new', 'compact', { activeSessionId: 'chat_new' });
     await renameChatSession('w_core', 'chat_new', 'Agent loop notes');
@@ -100,7 +101,7 @@ describe('brainx real chat API', () => {
     await cancelChatSession('w_core', 'chat_new');
     await deleteChatSession('w_core', 'chat_new');
 
-    expect(fetch).toHaveBeenNthCalledWith(1, '/api/v1/workspaces/w_core/chat/sessions', {
+    expect(fetch).toHaveBeenNthCalledWith(1, '/api/v1/workspaces/w_core/chat/sessions?clientDaemonId=cd_1', {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' }
     });
     expect(fetch).toHaveBeenNthCalledWith(2, '/api/v1/workspaces/w_core/chat/sessions/chat_new', {
@@ -109,7 +110,7 @@ describe('brainx real chat API', () => {
     expect(fetch).toHaveBeenNthCalledWith(3, '/api/v1/workspaces/w_core/chat/sessions', {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({})
+      body: JSON.stringify({ clientDaemonId: 'cd_1' })
     });
     expect(fetch).toHaveBeenNthCalledWith(4, '/api/v1/workspaces/w_core/chat/sessions/chat_new/messages', {
       method: 'POST',
@@ -200,19 +201,19 @@ describe('brainx real chat API', () => {
   });
 
   it('sends slash commands to the command endpoint without message content', async () => {
-    const fetch = vi.fn(() => okJson({ ...session, activeModelName: 'nvidia-step' }));
+    const fetch = vi.fn(() => okJson({ ...session, activeModelName: 'nvidia:stepfun-ai/step-3.7-flash' }));
     vi.stubGlobal('fetch', fetch);
 
-    const result = await sendChatCommand('w_core', 'model', { modelName: 'nvidia-step' });
+    const result = await sendChatCommand('w_core', 'model', { modelName: 'nvidia:stepfun-ai/step-3.7-flash' });
 
-    expect(result.activeModelName).toBe('nvidia-step');
+    expect(result.activeModelName).toBe('nvidia:stepfun-ai/step-3.7-flash');
     expect(fetch).toHaveBeenCalledWith('/api/v1/workspaces/w_core/chat/commands', {
       method: 'POST',
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ command: 'model', arguments: { modelName: 'nvidia-step' } })
+      body: JSON.stringify({ command: 'model', arguments: { modelName: 'nvidia:stepfun-ai/step-3.7-flash' } })
     });
   });
 
@@ -276,6 +277,7 @@ describe('brainx real chat API', () => {
       workspaceId: 'w_core',
       userId: 'u_1',
       deviceName: 'devbox',
+      operatingSystem: 'Linux 6.6.87 x86_64',
       status: 'active',
       capabilities: ['model.invoke'],
       boundAt: '2026-07-06T00:00:00.000Z',
@@ -293,6 +295,8 @@ describe('brainx real chat API', () => {
     await unbindClientDaemon('token_a', 'cd_1');
 
     expect(daemons[0].deviceName).toBe('devbox');
+    expect(daemons[0].name).toBe('devbox');
+    expect(daemons[0].os).toBe('Linux 6.6.87 x86_64');
     expect(bound.id).toBe('cd_1');
     expect(fetch).toHaveBeenNthCalledWith(1, '/api/v1/client-daemons', {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: 'Bearer token_a' }
@@ -317,6 +321,32 @@ describe('brainx real chat API', () => {
     await expect(getWorkspaces('token_a')).resolves.toEqual(workspaces);
 
     expect(fetch).toHaveBeenCalledWith('/api/v1/workspaces', {
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: 'Bearer token_a' }
+    });
+  });
+
+  it('loads real dashboard data from the server', async () => {
+    const dashboard = {
+      workspace: { id: 'w_core', name: 'Brainx Local' },
+      agents: [],
+      activeRuns: [],
+      pendingApprovals: [],
+      branches: [],
+      skillDrafts: [],
+      daemons: [],
+      chatSessions: [],
+      recentEvents: [],
+      stats: {
+        tokenUsage: { total: 42, byModel: [{ modelName: 'nvidia:stepfun-ai/step-3.7-flash', totalTokens: 42 }] },
+        runningByClient: []
+      }
+    };
+    const fetch = vi.fn(() => okJson(dashboard));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(getDashboard('token_a', 'w_core')).resolves.toEqual(dashboard);
+
+    expect(fetch).toHaveBeenCalledWith('/api/v1/workspaces/w_core/dashboard', {
       headers: { Accept: 'application/json', 'Content-Type': 'application/json', Authorization: 'Bearer token_a' }
     });
   });

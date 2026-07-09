@@ -23,44 +23,30 @@ describe('v0.3 feature page interactions', () => {
     await i18n.changeLanguage('en-US');
   });
 
-  it('lets users start an agent run and fork a branch from Agents', async () => {
-    const user = userEvent.setup();
+  it('keeps Agents as a roadmap page without mock run controls', async () => {
     renderAt('/workspaces/w_core/agents');
 
     expect(await screen.findByRole('heading', { name: 'Agents' })).toBeInTheDocument();
-    const startRunButtons = await screen.findAllByRole('button', { name: 'Start run' });
-    await user.click(startRunButtons[0]);
-    expect(await screen.findByText('Run queued for frontend-main')).toBeInTheDocument();
-
-    await user.click(screen.getAllByRole('button', { name: 'Fork branch' })[0]);
-    expect(await screen.findByText('Branch fork prepared from frontend-main')).toBeInTheDocument();
+    expect(await screen.findByText('Agent management is not open yet')).toBeInTheDocument();
+    expect(screen.getByText('Branch workflows are paused')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start run' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Fork branch' })).not.toBeInTheDocument();
   });
 
-  it('shows branch adoption as a selected review instead of passive text', async () => {
-    const user = userEvent.setup();
+  it('redirects the removed branches page to dashboard', async () => {
     renderAt('/workspaces/w_core/branches');
 
-    expect(await screen.findByRole('heading', { name: 'Branches' })).toBeInTheDocument();
-    await user.click(await screen.findByRole('button', { name: 'Review motion-v2' }));
-
-    const review = screen.getByRole('complementary', { name: 'Adoption review' });
-    expect(within(review).getByText('Adoption target: motion-v2')).toBeInTheDocument();
-    expect(within(review).getByText(/No memory, context, or task history is merged automatically/)).toBeInTheDocument();
-    expect(within(review).getByRole('button', { name: 'Adopt selected changes' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Branches' })).not.toBeInTheDocument();
+    expect(screen.queryByText('motion-v2')).not.toBeInTheDocument();
   });
 
-  it('supports approving and denying approval requests with a reason', async () => {
-    const user = userEvent.setup();
+  it('does not expose the removed approvals route', async () => {
     renderAt('/workspaces/w_core/approvals');
 
-    const reviewButtons = await screen.findAllByRole('button', { name: 'Review' });
-    await user.click(reviewButtons[0]);
-    const reason = screen.getByRole('textbox', { name: 'Decision reason' });
-    await user.type(reason, 'Evidence reviewed and risk accepted');
-    await user.click(screen.getByRole('button', { name: 'Deny' }));
-
-    expect(await screen.findByText('Denied')).toBeInTheDocument();
-    expect(screen.getAllByText('Evidence reviewed and risk accepted').length).toBeGreaterThan(0);
+    expect(await screen.findByRole('heading', { name: /^dashboard$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Approvals' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review' })).not.toBeInTheDocument();
   });
 
   it('lets users approve or reject pending skill proposals from the review page', async () => {
@@ -72,9 +58,15 @@ describe('v0.3 feature page interactions', () => {
     expect(await screen.findByText('summarize-session')).toBeInTheDocument();
 
     await user.click(screen.getAllByRole('button', { name: 'Approve' })[0]);
-    await waitFor(() => expect(screen.queryByText('review-agent-output')).not.toBeInTheDocument());
+    await waitFor(() => {
+      expect(within(screen.getByRole('region', { name: 'Skill proposals' })).queryByText('review-agent-output')).not.toBeInTheDocument();
+    });
     await user.click(screen.getAllByRole('button', { name: 'Reject' })[0]);
 
     expect(await screen.findByText('No pending skill proposals.')).toBeInTheDocument();
+    const results = await screen.findByRole('region', { name: 'Approval results' });
+    expect(within(results).getByLabelText('Skill review approved')).toBeInTheDocument();
+    expect(within(results).getByLabelText('Skill review rejected')).toBeInTheDocument();
+    expect(results).not.toHaveTextContent(/\bapproved\b|\brejected\b|\breview_requested\b/);
   });
 });
